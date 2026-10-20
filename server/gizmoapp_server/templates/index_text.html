@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Debate Agora</title>
+    <meta name="description" content="Bring a question to a thoughtful group conversation.">
+    <meta name="theme-color" content="#f7f3eb">
+    <base href="{{ base_href }}">
+    <link rel="icon" href="{{ icon_url }}" sizes="192x192">
+    <link rel="stylesheet" href="{{ shared_asset_base }}base.css">
+    <link rel="stylesheet" href="{{ asset_base }}debate.css">
+  </head>
+  <body class="shell-body debate-body">
+    <a class="skip-link" href="#app-view">Skip to main content</a>
+    <div class="debate-shell" id="app">
+      <header class="site-header">
+        <a class="brand" href="{{ base_href }}" aria-label="Debate Agora home">
+          Debate Agora
+        </a>
+        <div id="stage-navigation" class="stage-navigation"></div>
+      </header>
+      <main id="app-view" class="app-content" tabindex="-1" aria-label="Debate"></main>
+    </div>
+    <dialog id="summary-dialog" class="summary-dialog" aria-labelledby="summary-dialog-title"></dialog>
+    <div id="app-error" class="app-error" role="alert" aria-live="assertive" hidden></div>
+
+    <script id="gizmoapp-config" type="application/json">{{ client_config | tojson }}</script>
+    <script src="{{ shared_asset_base }}boot.js"></script>
+    <script type="module" src="{{ asset_base }}debate.js"></script>
+  </body>
+</html>

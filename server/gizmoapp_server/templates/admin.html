@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>{{ app_name }} Admin</title>
+    <link rel="stylesheet" href="{{ root_path }}app/base.css">
+    <link rel="stylesheet" href="{{ root_path }}app/styles.css">
+  </head>
+  <body class="admin-body">
+    <div class="app-frame">
+      <header class="app-topbar">
+        <a class="brand-mark" href="{{ root_path }}" aria-label="{{ app_name }} home">G</a>
+        <div class="brand-copy">
+          <p class="shell-kicker">Admin</p>
+          <h1>{{ app_name }}</h1>
+          <p class="shell-copy">Active shell: {{ shell_label }} ({{ shell_variant }})</p>
+        </div>
+        <nav class="app-actions" aria-label="Admin controls">
+          <a class="command-button" href="{{ root_path }}">App</a>
+        </nav>
+      </header>
+
+      <main class="layout admin-layout">
+        <section class="panel-card reveal">
+          <p class="eyebrow">Runtime Summary</p>
+          <h2>Deployment-facing details</h2>
+          <div class="info-grid">
+            <div>
+              <span class="label">Database</span>
+              <strong>{{ summary.database_path }}</strong>
+            </div>
+            <div>
+              <span class="label">Sample nodes</span>
+              <strong>{{ summary.sample_node_count }}</strong>
+            </div>
+            <div>
+              <span class="label">State records</span>
+              <strong>{{ summary.app_state_count }}</strong>
+            </div>
+            <div>
+              <span class="label">Events</span>
+              <strong>{{ summary.app_event_count }}</strong>
+            </div>
+            <div>
+              <span class="label">Schema</span>
+              <strong>{{ summary.schema_version }}</strong>
+            </div>
+            <div>
+              <span class="label">Root path</span>
+              <strong>{{ root_path }}</strong>
+            </div>
+            <div>
+              <span class="label">Shell</span>
+              <strong>{{ shell_variant }}</strong>
+            </div>
+            <div>
+              <span class="label">Server time</span>
+              <strong>{{ now }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-card reveal">
+          <p class="eyebrow">Operational Notes</p>
+          <h2>Current assumptions</h2>
+          <ul class="admin-list">
+            {% for note in notes %}
+            <li>{{ note }}</li>
+            {% endfor %}
+          </ul>
+        </section>
+
+        <section class="panel-card reveal">
+          <p class="eyebrow">Available Shells</p>
+          <h2>Frontend variants in this repo</h2>
+          <ul class="admin-list">
+            {% for shell in available_shells %}
+            <li>{{ shell.label }}: {{ shell.description }}</li>
+            {% endfor %}
+          </ul>
+        </section>
+
+        <section class="panel-card reveal">
+          <p class="eyebrow">Seeded Scene Data</p>
+          <h2>Sample records</h2>
+          <ul class="admin-list">
+            {% for node in sample_nodes %}
+            <li>{{ node.label }}: {{ node.description }}</li>
+            {% else %}
+            <li>No sample records have been added.</li>
+            {% endfor %}
+          </ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

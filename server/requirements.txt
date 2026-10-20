@@ -1,0 +1,5 @@
+# Direct runtime dependencies are pinned so installs are reproducible.
+# Review and validate upgrades deliberately before changing these versions.
+Flask==3.1.3
+gunicorn==26.0.0
+openai==2.46.0
