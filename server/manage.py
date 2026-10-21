@@ -38,6 +38,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--debug", action="store_true")
     run_parser.add_argument("--shell", choices=shell_choices)
 
+    credits = subparsers.add_parser("credit-requests", help="List pending reply allowance requests (no email addresses).")
+    credits.add_argument("--shell", choices=shell_choices)
+    review = subparsers.add_parser("review-credit-request", help="Approve or decline one allowance request, once.")
+    review.add_argument("request_id")
+    review.add_argument("--replies", type=int, default=50)
+    review.add_argument("--decline", action="store_true")
+    review.add_argument("--shell", choices=shell_choices)
+    admin = subparsers.add_parser("grant-admin", help="Allow one existing verified account to review credit requests.")
+    admin.add_argument("--email", required=True)
+    admin.add_argument("--shell", choices=shell_choices)
+
     return parser
 
 
@@ -77,6 +88,41 @@ def main() -> None:
         raise SystemExit(0 if ready else 1)
 
     app = create_app(shell_variant=shell)
+
+    if args.command == "grant-admin":
+        from gizmoapp_server.db import get_db, WRITE_LOCK
+        from gizmoapp_server.account_api import CREDIT_REVIEWER_EMAIL
+        if args.email.strip().casefold() != CREDIT_REVIEWER_EMAIL:
+            parser.error("Credit review is restricted to the designated operator account.")
+        with app.app_context(), WRITE_LOCK:
+            connection = get_db()
+            user = connection.execute("SELECT id FROM account_users WHERE email=? COLLATE NOCASE", (args.email,)).fetchone()
+            if not user:
+                parser.error("No verified account with that email.")
+            connection.execute("DELETE FROM account_admins WHERE user_id<>?", (user["id"],))
+            connection.execute("INSERT OR IGNORE INTO account_admins VALUES (?)", (user["id"],))
+            connection.commit()
+            print("Credit review enabled for the account.")
+        return
+
+    if args.command == "credit-requests":
+        from gizmoapp_server.db import get_db
+        with app.app_context():
+            rows = get_db().execute("SELECT id,created_at FROM account_credit_requests WHERE state='pending' ORDER BY created_at").fetchall()
+            for row in rows:
+                print(f"{row['id']}  {datetime.fromtimestamp(row['created_at'], UTC).isoformat()}")
+            print(f"{len(rows)} pending")
+        return
+
+    if args.command == "review-credit-request":
+        from gizmoapp_server.account_usage import review_credit_request
+        with app.app_context():
+            try:
+                changed = review_credit_request(args.request_id, args.replies, decline=args.decline)
+            except ValueError as error:
+                parser.error(str(error))
+            print("Request reviewed." if changed else "No pending request with that ID; no balance changed.")
+        return
 
     if args.command == "describe":
         summary = database_summary(app.config)

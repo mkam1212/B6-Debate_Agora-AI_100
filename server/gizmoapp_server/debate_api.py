@@ -9,11 +9,18 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, current_app, g, jsonify, make_response, request, stream_with_context
 
-from . import llm
+from . import llm, agent_tools
+from .account_api import AccountError, _require_user
+from .avatar_colors import normalize_avatar_color
+from .account_usage import reserve_reply, finish_reply, usage_summary
+from .debate_replies import commit_reply
+from .attachments import normalize_attachments, link_attachments
 from .debate_language import DEFAULT_LANGUAGE_INSTRUCTION
+from .debate_rounds import round_context
 from .debate_examples import get_example, get_sample_discussion, list_examples
 from .debate_runner import (
     ModelUnavailable,
@@ -51,7 +58,9 @@ from .debate_chat import (
     stream_role_reply,
 )
 from .config import scoped_path
-from .db import get_db
+from .db import get_db, WRITE_LOCK
+from .session_access import require_session, session_response, saved_summary, summary_fingerprint
+from .debate_sessions import _now
 
 MAX_QUESTION_LENGTH = 4_000
 MAX_TEXT_LENGTH = 6_000
@@ -80,6 +89,11 @@ _SOURCE_ARCHIVE_DIRS = (
 )
 _SOURCE_ARCHIVE_FILES = (
     "Makefile",
+    "server/gizmoapp_server/static/app/text/assets/debate-agora-wordmark.png",
+    "server/gizmoapp_server/static/app/text/vendor/LUCIDE-LICENSE",
+    "tests/test_frontend_drafts.mjs",
+    "tests/test_frontend_sources.mjs",
+    "tests/test_frontend_attachments.mjs",
     "server/__init__.py",
     "server/manage.py",
     "server/wsgi.py",
@@ -95,10 +109,19 @@ _SOURCE_ARCHIVE_SKIP_PARTS = frozenset(
 _DEBATE_SUMMARY_SYSTEM_PROMPT = (
     "Summarize this saved Debate conversation as plain text. "
     f"{DEFAULT_LANGUAGE_INSTRUCTION} "
-    "Write all four concise section labels in the selected output language: main views, "
-    "disagreements, open questions/conditions, and optional next-step suggestions. Attribute viewpoints using each saved "
+    "Write four concise sections in the selected output language: What changed, The key trade-off, "
+    "Evidence & unknowns, and A useful next step. In What changed, identify a correction, narrowed choice, or useful "
+    "new consideration from the conversation; if nobody changed their mind, say so without inventing progress. "
+    "In What changed, explicitly name any real concession and who made it. If one argument held up better under "
+    "challenge, explain why; if there is no clear winner, say so. Never score by the number of agents who agreed. "
+    "In The key trade-off state the outcome of the central disagreement and the strongest remaining objection. "
+    "In Evidence & unknowns separate retrieved evidence from assumptions and name the missing information that "
+    "could change the answer. A fetched source is not automatically a verified fact: preserve dates, scope, "
+    "uncertainty and disagreements about interpretation. Multiple agents sharing one source are not independent "
+    "corroboration. A useful next step is one small optional action or test connected to that uncertainty. "
+    "Attribute viewpoints using each saved "
     "name exactly as written and its concrete identity when useful; do not transliterate names to pinyin or output internal "
-    "roleType labels or metadata. Do not force consensus. Aim for 150–250 English words by default, or an equivalent "
+    "roleType labels or metadata. Do not force consensus or claim the user made a decision. Aim for 100–180 English words by default, or an equivalent "
     "natural length when another language is explicitly requested; "
     "a soft target, not a cutoff; complete the summary and do not truncate a thought to meet it. Use plain-text labels, "
     "not Markdown asterisk emphasis. Summarize the discussion rather than restating the opening question in full. The opening question and "
@@ -168,14 +191,19 @@ def _role_reply_event_response(
     coordination_reply_to_message_id: str | None = None,
     selection_mode: str = "explicit",
     fallback_reason: str | None = None,
+    reservation_id: str | None = None,
 ):
     selection_metadata = _reply_selection_metadata(participant_id, selection_mode, fallback_reason)
 
     @stream_with_context
     def events():
+        completed = False
         try:
             reply_mode = None
             waiting_for_user = None
+            has_text = False
+            content = ""
+            citations = []
             for event in stream_role_reply(
                 session,
                 participant,
@@ -204,20 +232,35 @@ def _role_reply_event_response(
                     text = event.get("text")
                     if reply_mode is None or waiting_for_user is None or not isinstance(text, str) or not text:
                         raise llm.CourseLLMError("The course model returned an invalid participant reply stream.")
+                    has_text = has_text or bool(text.strip())
+                    content += text
                     yield _sse({"type": "delta", "text": text})
+                elif event.get("type") == "activity":
+                    if reply_mode is None or event.get("phase") not in {"searching", "reading", "answering", "unavailable"}:
+                        raise llm.CourseLLMError("Invalid reply activity.")
+                    yield _sse({"type": "activity", "speakerId": participant_id, "phase": event["phase"]})
+                elif event.get("type") == "citations":
+                    if reply_mode is None or not isinstance(event.get("text"), str) or not isinstance(event.get("citations"), list):
+                        raise llm.CourseLLMError("Invalid reply sources.")
+                    content, citations = event['text'], event['citations']
+                    yield _sse({"type": "citations", "speakerId": participant_id, "text": content, "citations": citations})
                 else:
                     raise llm.CourseLLMError("The course model returned an unknown participant reply event.")
-            if reply_mode is None or waiting_for_user is None:
+            if reply_mode is None or waiting_for_user is None or not has_text:
                 raise llm.CourseLLMError("The course model returned no reply control marker.")
+            result = commit_reply(session, participant, reservation_id, content,
+                                  waiting=waiting_for_user, citations=citations)
+            completed = True
             yield _sse(
                 {
                     "type": "done",
                     **selection_metadata,
                     "waitingForUser": waiting_for_user,
                     "replyMode": reply_mode,
+                    **result,
                 }
             )
-        except llm.CourseLLMError as exc:
+        except (llm.CourseLLMError, AccountError) as exc:
             error_event: dict[str, Any] = {
                 "type": "error",
                 "message": f"AI role reply is unavailable: {exc}",
@@ -228,12 +271,23 @@ def _role_reply_event_response(
             if isinstance(diagnostics, dict):
                 error_event["diagnostics"] = diagnostics
             yield _sse(error_event)
+        finally:
+            if not completed:
+                finish_reply(reservation_id, False)
 
-    return Response(
+    response = Response(
         events(),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+    app = current_app._get_current_object()
+
+    @response.call_on_close
+    def release_unused_hold():
+        with app.app_context():
+            finish_reply(reservation_id, False)
+
+    return response
 
 
 def _json_payload() -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
@@ -274,6 +328,8 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         }
         if "identity" in participant:
             normalized_participant["identity"] = _string(participant, "identity", MAX_ROLE_IDENTITY_LENGTH)
+        if "avatarColor" in participant:
+            normalized_participant["avatarColor"] = normalize_avatar_color(participant["avatarColor"])
         if "avatarSeed" in participant:
             avatar_seed = participant["avatarSeed"]
             if (
@@ -311,9 +367,14 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(message, dict):
             raise ValueError("each message must be an object")
         kind = _string(message, "kind", 16, required=True)
-        body = _string(message, "body", MAX_SESSION_MESSAGE_LENGTH, required=True)
+        body = _string(message, "body", MAX_SESSION_MESSAGE_LENGTH)
         if kind == "user":
+            attachments = normalize_attachments(message.get("attachments", []))
+            if not body and not attachments:
+                raise ValueError("A user message must contain text or attachments")
             normalized_message = {"kind": "user", "body": body}
+            if attachments:
+                normalized_message["attachments"] = attachments
             message_id = record_message_id(message.get("id"), required=False)
             if message_id is not None:
                 normalized_message["id"] = message_id
@@ -324,6 +385,8 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 normalized_message["participantId"] = participant_id
             messages.append(normalized_message)
         elif kind == "participant":
+            if not body:
+                raise ValueError("A participant message must contain text")
             role_id = _string(message, "roleId", 48, required=True)
             if CHAT_ROLE_ID_RE.fullmatch(role_id) is None:
                 raise ValueError("message participant ID is invalid")
@@ -339,6 +402,28 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("participant message waitingForUser must be a boolean")
             if waiting_for_user:
                 normalized_message["waitingForUser"] = True
+            if type(message.get("roundEnd", False)) is not bool:
+                raise ValueError("participant message roundEnd must be a boolean")
+            if message.get("roundEnd"):
+                normalized_message["roundEnd"] = True
+            if "citations" in message:
+                raw_citations = message["citations"]
+                if not isinstance(raw_citations, list) or len(raw_citations) > 12:
+                    raise ValueError("citations must contain at most 12 web sources")
+                citations = []
+                for citation in raw_citations:
+                    if not isinstance(citation, dict):
+                        raise ValueError("each citation must be an object")
+                    url = _string(citation, "url", 2048, required=True)
+                    try:
+                        parsed = urlsplit(url)
+                        valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
+                    except ValueError:
+                        valid = False
+                    if not valid or any(ord(char) < 33 for char in url):
+                        raise ValueError("citation URLs must use HTTP or HTTPS without embedded credentials")
+                    citations.append({"url": url, "title": _string(citation, "title", 240), "excerpt": _string(citation, "excerpt", 600)})
+                normalized_message["citations"] = citations
             messages.append(normalized_message)
         else:
             raise ValueError("message kind must be user or participant")
@@ -347,13 +432,18 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(message, dict):
             raise ValueError("each pending user message must be an object")
         message_id = record_message_id(message.get("id"), required=True)
-        body = _string(message, "body", MAX_SESSION_MESSAGE_LENGTH, required=True)
+        body = _string(message, "body", MAX_SESSION_MESSAGE_LENGTH)
+        attachments = normalize_attachments(message.get("attachments", []))
+        if not body and not attachments:
+            raise ValueError("A queued message must contain text or attachments")
         participant_id = message.get("participantId")
         if participant_id is not None and (
             not isinstance(participant_id, str) or participant_id not in participant_ids
         ):
             raise ValueError("pending message participantId must identify a saved participant")
         pending = {"id": message_id, "body": body}
+        if attachments:
+            pending["attachments"] = attachments
         if participant_id is not None:
             pending["participantId"] = participant_id
         pending_user_messages.append(pending)
@@ -368,6 +458,7 @@ def _normalize_session_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "pendingUserMessages": pending_user_messages,
         "draft": _string(payload, "draft", MAX_SESSION_MESSAGE_LENGTH),
+        "draftAttachments": normalize_attachments(payload.get("draftAttachments", [])),
         "debateStarted": debate_started,
         "paused": paused,
     }
@@ -702,6 +793,7 @@ def register_debate_routes(app: Flask) -> None:
 
     @app.post(scoped_path(prefix, "api/debate/roles/generate"))
     def generate_roles():
+        _require_user()
         payload, error = _json_payload()
         if error:
             return error
@@ -770,6 +862,7 @@ def register_debate_routes(app: Flask) -> None:
 
     @app.post(scoped_path(prefix, "api/debate/sessions"))
     def create_chat_session():
+        user = _require_user()
         payload, error = _json_payload()
         if error:
             return error
@@ -777,8 +870,9 @@ def register_debate_routes(app: Flask) -> None:
             snapshot = _normalize_session_snapshot(payload)
         except ValueError as exc:
             return _error(str(exc))
-        session = create_session(get_db(), snapshot)
-        return jsonify({"session": session}), 201
+        session = create_session(get_db(), snapshot, user["id"])
+        link_attachments(get_db(), session)
+        return jsonify({"session": session_response(session, "owner")}), 201
 
     @app.route(
         scoped_path(prefix, "api/debate/sessions/<session_id>"),
@@ -789,28 +883,36 @@ def register_debate_routes(app: Flask) -> None:
             return _error("Session not found", 404)
         connection = get_db()
         if request.method == "GET":
-            session = fetch_session(connection, session_id)
-            if session is None:
-                return _error("Session not found", 404)
-            return jsonify({"session": session})
+            session, access = require_session(session_id)
+            return jsonify({"session": session_response(session, access)})
 
+        user = _require_user()
+        require_session(session_id, edit=True)
         payload, error = _json_payload()
         if error:
             return error
         try:
             expected_revision = _expected_session_revision(payload)
             snapshot = _normalize_session_snapshot(payload)
+            if snapshot["debateStarted"] and usage_summary(user["id"])["remaining"] <= 0:
+                snapshot["paused"] = True
+            agent_tools.bind_citations(session_id, snapshot["messages"])
         except ValueError as exc:
             return _error(str(exc))
-        session = update_session(connection, session_id, snapshot, expected_revision)
+        try:
+            session = update_session(connection, session_id, snapshot, expected_revision)
+        except ValueError as exc:
+            return _error(str(exc), 409)
         if session is None:
             if fetch_session(connection, session_id) is None:
                 return _error("Session not found", 404)
             return _error("This session was updated elsewhere. Reload the latest session before saving.", 409)
-        return jsonify({"session": session})
+        link_attachments(connection, session)
+        return jsonify({"session": session_response(session, "owner")})
 
     @app.post(scoped_path(prefix, "api/debate/sessions/<session_id>/reply"))
     def chat_role_reply(session_id: str):
+        user = _require_user()
         if SESSION_ID_RE.fullmatch(session_id) is None:
             return _error("Session not found", 404)
         payload, error = _json_payload()
@@ -828,29 +930,36 @@ def register_debate_routes(app: Flask) -> None:
             return _error(str(exc))
 
         connection = get_db()
-        session = fetch_session(connection, session_id)
-        if session is None:
-            return _error("Session not found", 404)
-        if participant_id is None:
-            selection = select_participant_for_turn(session)
-            participant = selection.participant
-            if participant is None:
-                return _error("No participant is available to continue this discussion.", 409)
-            participant_id = participant["id"]
-            coordination_focus = selection.focus
-            coordination_intent = selection.intent
-            coordination_reply_to_message_id = selection.reply_to_message_id
-            selection_mode = "coordinator" if selection.mode == "coordinator" else "fallback"
-            fallback_reason = selection.fallback_reason
-        else:
-            participant = next((item for item in session["participants"] if item["id"] == participant_id), None)
-            if participant is None:
-                return _error("participantId is not part of this saved session.", 404)
-            coordination_focus = None
-            coordination_intent = "respond"
-            coordination_reply_to_message_id = None
-            selection_mode = "explicit"
-            fallback_reason = None
+        session, _ = require_session(session_id, edit=True)
+        if len(session['messages']) + len(session['pendingUserMessages']) >= MAX_SESSION_MESSAGES:
+            raise AccountError('This conversation is full. Start a new debate to keep going.', 409)
+        if usage_summary(user["id"])["remaining"] <= 0:
+            raise AccountError("You’ve used all your AI replies. Open Usage to invite a friend or request more.", 402)
+        reservation_id = reserve_reply(user["id"], session_id)
+        try:
+            if participant_id is None:
+                selection = select_participant_for_turn(session)
+                participant = selection.participant
+                if participant is None:
+                    raise AccountError("No participant is available to continue this discussion.", 409)
+                participant_id = participant["id"]
+                coordination_focus = selection.focus
+                coordination_intent = selection.intent
+                coordination_reply_to_message_id = selection.reply_to_message_id
+                selection_mode = "coordinator" if selection.mode == "coordinator" else "fallback"
+                fallback_reason = selection.fallback_reason
+            else:
+                participant = next((item for item in session["participants"] if item["id"] == participant_id), None)
+                if participant is None:
+                    raise AccountError("participantId is not part of this saved session.", 404)
+                coordination_focus = None
+                coordination_intent = "respond"
+                coordination_reply_to_message_id = None
+                selection_mode = "explicit"
+                fallback_reason = None
+        except Exception:
+            finish_reply(reservation_id, False)
+            raise
         if "text/event-stream" in request.headers.get("Accept", ""):
             return _role_reply_event_response(
                 session,
@@ -861,15 +970,32 @@ def register_debate_routes(app: Flask) -> None:
                 coordination_reply_to_message_id=coordination_reply_to_message_id,
                 selection_mode=selection_mode,
                 fallback_reason=fallback_reason,
+                reservation_id=reservation_id,
             )
+        completed = False
+        citations = []
         try:
-            content, waiting_for_user, reply_mode = generate_role_reply(
-                session,
-                participant,
-                coordination_focus=coordination_focus,
-                coordination_intent=coordination_intent,
-                coordination_reply_to_message_id=coordination_reply_to_message_id,
-            )
+            if agent_tools.enabled():
+                content, waiting_for_user, reply_mode = "", False, agent_tools.REPLY_MODE
+                for event in stream_role_reply(session, participant, coordination_focus=coordination_focus,
+                    coordination_intent=coordination_intent, coordination_reply_to_message_id=coordination_reply_to_message_id):
+                    if event["type"] == "delta":
+                        content += event["text"]
+                    elif event["type"] == "citations":
+                        content, citations = event["text"], event["citations"]
+            else:
+                content, waiting_for_user, reply_mode = generate_role_reply(
+                    session,
+                    participant,
+                    coordination_focus=coordination_focus,
+                    coordination_intent=coordination_intent,
+                    coordination_reply_to_message_id=coordination_reply_to_message_id,
+                )
+            if not isinstance(content, str) or not content.strip():
+                raise llm.CourseLLMError("The model returned no usable reply.")
+            result = commit_reply(session, participant, reservation_id, content,
+                                  waiting=waiting_for_user, citations=citations)
+            completed = True
         except llm.CourseLLMError as exc:
             diagnostics = getattr(exc, "public_diagnostics", None)
             return _error(
@@ -878,6 +1004,8 @@ def register_debate_routes(app: Flask) -> None:
                 diagnostics=diagnostics,
                 reply_mode=getattr(exc, "reply_mode", None),
             )
+        finally:
+            finish_reply(reservation_id, completed)
         return jsonify(
             {
                 "speakerId": participant_id,
@@ -886,6 +1014,8 @@ def register_debate_routes(app: Flask) -> None:
                     participant_id, selection_mode, fallback_reason
                 )["fallbackReason"],
                 "content": content,
+                **result,
+                **({"citations": citations} if reply_mode == agent_tools.REPLY_MODE else {}),
                 "waitingForUser": waiting_for_user,
                 "replyMode": reply_mode,
             }
@@ -893,15 +1023,17 @@ def register_debate_routes(app: Flask) -> None:
 
     @app.post(scoped_path(prefix, "api/debate/sessions/<session_id>/summary"))
     def summarize_chat_session(session_id: str):
+        _require_user()
         if SESSION_ID_RE.fullmatch(session_id) is None:
             return _error("Session not found", 404)
         payload, error = _json_payload()
         if error:
             return error
         del payload
-        session = fetch_session(get_db(), session_id)
-        if session is None:
-            return _error("Session not found", 404)
+        session, _ = require_session(session_id, edit=True)
+        cached = saved_summary(session)
+        if cached and not cached["isStale"]:
+            return jsonify(cached)
 
         participant_reply_count = sum(
             1
@@ -925,8 +1057,11 @@ def register_debate_routes(app: Flask) -> None:
             and isinstance(message.get("body"), str)
             and not is_mock_message(message)
         )
+        from .account_api import _rate_limit
+        _rate_limit(f"summary:{session_id}", 12, 3600)
         summary_context = {
             "question": session["question"],
+            "retrievedSources": agent_tools.evidence(session_id),
             "sourceRevision": session["revision"],
             "participants": [
                 {
@@ -947,12 +1082,23 @@ def register_debate_routes(app: Flask) -> None:
                         "content": json.dumps(summary_context, ensure_ascii=False, separators=(",", ":")),
                     },
                 ],
-                max_tokens=MAX_CHAT_REPLY_TOKENS,
+                max_tokens=650,
             )
-        except llm.CourseLLMError as exc:
-            return _error(f"AI summary is unavailable: {exc}", 503)
+        except llm.CourseLLMError:
+            return _error("Couldn’t update the summary. Please try again.", 503)
         if not isinstance(summary, str) or not summary.strip():
             return _error("AI summary returned no usable text. Please retry.", 503)
+        with WRITE_LOCK:
+            if fetch_session(get_db(), session_id) is None:
+                return _error("This conversation is no longer available.", 404)
+            get_db().execute(
+                "INSERT INTO debate_session_summaries VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET body=excluded.body,content_hash=excluded.content_hash,"
+                "message_count=excluded.message_count,source_revision=excluded.source_revision,updated_at=excluded.updated_at "
+                "WHERE excluded.source_revision>=debate_session_summaries.source_revision",
+                (session_id, summary.strip(), summary_fingerprint(session), summarized_message_count, session["revision"], _now()),
+            )
+            get_db().commit()
         return jsonify(
             {
                 "summary": summary.strip(),
@@ -964,8 +1110,10 @@ def register_debate_routes(app: Flask) -> None:
     @app.route(scoped_path(prefix, "api/debate/discussions"), methods=["GET", "POST"])
     def discussions():
         connection = get_db()
+        user = _require_user()
         if request.method == "GET":
-            return jsonify({"discussions": list_discussions(connection)})
+            owned = {r[0] for r in connection.execute("SELECT id FROM debate_discussions WHERE owner_id=?", (user["id"],))}
+            return jsonify({"discussions": [d for d in list_discussions(connection) if d["id"] in owned]})
         payload, error = _json_payload()
         if error:
             return error
@@ -976,6 +1124,9 @@ def register_debate_routes(app: Flask) -> None:
         except ValueError as exc:
             return _error(str(exc))
         discussion = create_discussion(connection, question, perspectives, sources)
+        with WRITE_LOCK:
+            connection.execute("UPDATE debate_discussions SET owner_id=? WHERE id=?", (user["id"], discussion["id"]))
+            connection.commit()
         return jsonify({"discussion": discussion}), 201
 
     @app.get(scoped_path(prefix, "api/debate/discussions/<discussion_id>"))
@@ -1088,6 +1239,8 @@ def register_debate_routes(app: Flask) -> None:
         methods=["GET", "POST"],
     )
     def discussion_run(discussion_id: str):
+        if request.method == "POST":
+            _require_user()
         connection = get_db()
         current = fetch_discussion(connection, discussion_id)
         if current is None:
@@ -1107,6 +1260,7 @@ def register_debate_routes(app: Flask) -> None:
 
     @app.post(scoped_path(prefix, "api/debate/discussions/<discussion_id>/continue"))
     def continue_with_assumptions(discussion_id: str):
+        _require_user()
         payload, error = _json_payload()
         if error:
             return error

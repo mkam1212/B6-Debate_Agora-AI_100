@@ -23,11 +23,19 @@ class AgentScaffoldingTests(unittest.TestCase):
             check=False,
         )
 
-    def test_js_checker_runs_without_node(self):
+    def test_js_checker_uses_the_javascript_parser(self):
         result = self.run_command(sys.executable, "scripts/check_js_syntax.py")
 
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("Node not required", result.stdout)
+        self.assertIn("Node.js", result.stdout)
+
+    def test_js_checker_accepts_regex_and_rejects_invalid_syntax(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'sample.js'
+            script.write_text('const pattern = /\\[[^\\]]*\\]/gu;\n', encoding='utf-8')
+            self.assertEqual(self.run_command(sys.executable, 'scripts/check_js_syntax.py', str(script)).returncode, 0)
+            script.write_text('const broken = ;\n', encoding='utf-8')
+            self.assertNotEqual(self.run_command(sys.executable, 'scripts/check_js_syntax.py', str(script)).returncode, 0)
 
     def test_always_loaded_agent_context_stays_focused(self):
         agent_words = (ROOT_DIR / "AGENTS.md").read_text(encoding="utf-8").split()

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from flask import Flask, abort, current_app, render_template, request, send_from_directory
+from flask import Flask, abort, current_app, redirect, render_template, request, send_from_directory
 
 from .config import scoped_path
 from .db import database_summary, fetch_sample_nodes, get_db
@@ -50,6 +50,33 @@ def register_page_routes(app: Flask) -> None:
     def favicon():
         return _static_file_response("icons", "icon-192.png")
 
+    def homepage():
+        public_prefix = _public_prefix()
+        return render_template(
+            "home.html",
+            base_href=_root_path(),
+            asset_base=scoped_path(public_prefix, "app/text/"),
+            icon_url=scoped_path(public_prefix, "icons/icon-192.png"),
+            year=datetime.now(UTC).year,
+        )
+
+    def moved_page(path: str):
+        target = scoped_path(_public_prefix(), path)
+        if request.query_string:
+            target += "?" + request.query_string.decode("utf-8", errors="replace")
+        return redirect(target, code=302)
+
+    @app.get(scoped_path(prefix, "home"))
+    def legacy_homepage():
+        return moved_page("")
+
+    @app.get(scoped_path(prefix, "app"))
+    @app.get(scoped_path(prefix, "app/"))
+    @app.get(scoped_path(prefix, "app/participants"))
+    @app.get(scoped_path(prefix, "app/debate"))
+    def application():
+        return render_application()
+
     if "admin" in app.config["ENABLED_FEATURES"]:
         @app.get(scoped_path(prefix, "admin/"))
         def admin_page():
@@ -74,6 +101,17 @@ def register_page_routes(app: Flask) -> None:
         if path and path.split("/", 1)[0] in reserved_top_level:
             abort(404)
 
+        if current_app.config["APP_SHELL"] == "text":
+            if not path:
+                # Preserve old shared links and invitations while making / the landing page.
+                if any(key in request.args for key in ("invite", "question", "session")):
+                    return moved_page("app")
+                return homepage()
+            if path.rstrip("/") in {"participants", "debate"}:
+                return moved_page("app/" + path.rstrip("/"))
+        return render_application()
+
+    def render_application():
         public_prefix = _public_prefix()
         return render_template(
             current_app.config["APP_SHELL_TEMPLATE"],
@@ -81,6 +119,7 @@ def register_page_routes(app: Flask) -> None:
             app_tagline=current_app.config["APP_TAGLINE"],
             shell_description=current_app.config["APP_SHELL_DESCRIPTION"],
             base_href=_root_path(),
+            current_page=scoped_path(public_prefix, request.path.removeprefix(current_app.config["URL_PREFIX"]).lstrip("/")),
             shared_asset_base=scoped_path(public_prefix, "app/"),
             asset_base=scoped_path(public_prefix, current_app.config["APP_SHELL_ASSET_SUBPATH"]),
             icon_url=scoped_path(public_prefix, "icons/icon-192.png"),

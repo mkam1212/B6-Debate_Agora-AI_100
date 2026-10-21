@@ -1,0 +1,16 @@
+{% extends "emails/base.html" %}
+{% block content %}
+<h1 class="email-heading" style="margin:0 0 12px;font-size:28px;line-height:36px;font-weight:600;letter-spacing:-0.7px;color:#292d3a;">{{ heading }}</h1>
+<p style="margin:0 0 26px;color:#767e91;font-size:15px;line-height:24px;">{{ intro }}</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;">
+  <tr>
+    <td class="code-panel" align="center" bgcolor="#f0f1fb" style="padding:25px 16px;background-color:#f0f1fb;border:1px solid #dfe2f2;border-radius:12px;">
+      <span class="verification-code" style="display:block;font-family:'SFMono-Regular',Menlo,Consolas,'Courier New',monospace;font-size:38px;line-height:48px;font-weight:500;letter-spacing:9px;text-indent:9px;color:#3e4772;">{{ code }}</span>
+    </td>
+  </tr>
+  <tr><td align="center" style="padding-top:14px;font-size:12px;line-height:20px;color:#8d94a8;">Expires in 10 minutes</td></tr>
+</table>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;margin-top:28px;">
+  <tr><td style="padding-top:20px;border-top:1px solid #e8eaf2;font-size:12px;line-height:20px;color:#939aab;">Didn’t request this? You can safely ignore this email.<br>Keep your verification code private.</td></tr>
+</table>
+{% endblock %}

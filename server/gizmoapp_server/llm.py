@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import os
+import base64
+import re
 from collections.abc import Iterator, Sequence
 from typing import Any, Callable
+from urllib.parse import urlsplit
+
+from flask import current_app, has_app_context
 
 try:
     from openai import OpenAI
@@ -38,8 +43,17 @@ _client = None
 _client_signature: tuple[str, str, float] | None = None
 
 
+def _environment_value(name: str, default: str = "") -> str:
+    # Flask settings include the local .env; explicit process settings keep precedence.
+    if name in os.environ:
+        return os.environ[name]
+    if has_app_context():
+        return str(current_app.config.get(name, default))
+    return default
+
+
 def _required_environment(name: str) -> str:
-    value = os.environ.get(name, "").strip()
+    value = _environment_value(name).strip()
     if not value:
         raise CourseLLMError(
             f"{name} is not set. The AI100 platform supplies all course-model settings; "
@@ -49,7 +63,7 @@ def _required_environment(name: str) -> str:
 
 
 def _timeout_seconds() -> float:
-    raw_value = os.environ.get("GIZMO_LLM_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+    raw_value = _environment_value("GIZMO_LLM_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
     try:
         value = float(raw_value)
     except ValueError as exc:
@@ -91,7 +105,7 @@ def model_name() -> str:
 def is_configured() -> bool:
     """Report whether a server-side model call can be attempted, without exposing settings."""
     return OpenAI is not None and all(
-        os.environ.get(name, "").strip()
+        _environment_value(name).strip()
         for name in ("GIZMO_LLM_API_KEY", "GIZMO_LLM_BASE_URL", "GIZMO_LLM_MODEL")
     )
 
@@ -104,22 +118,46 @@ def _validate_max_tokens(max_tokens: int) -> int:
     return max_tokens
 
 
-def _validate_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, str]]:
+def _validate_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     if isinstance(messages, (str, bytes)) or not isinstance(messages, Sequence) or not messages:
         raise CourseLLMError("messages must be a non-empty sequence of message objects.")
 
-    validated: list[dict[str, str]] = []
+    validated: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             raise CourseLLMError("each message must be an object with role and content strings.")
         role = message.get("role")
         content = message.get("content")
+        if role == "user" and isinstance(content, list) and 1 <= len(content) <= 7:
+            parts = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise CourseLLMError("Invalid image message content.")
+                if part.get("type") == "text" and isinstance(part.get("text"), str) and part["text"].strip():
+                    parts.append({"type": "text", "text": part["text"]})
+                elif part.get("type") == "image_url" and isinstance(part.get("image_url"), dict):
+                    url = part["image_url"].get("url", "")
+                    if not isinstance(url, str) or len(url) > 8_000_000 or not re.fullmatch(r"data:image/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+", url):
+                        raise CourseLLMError("Invalid image attachment content.")
+                    try: base64.b64decode(url.partition(",")[2], validate=True)
+                    except ValueError: raise CourseLLMError("Invalid image attachment content.") from None
+                    parts.append({"type": "image_url", "image_url": {"url": url, "detail": "auto"}})
+                else:
+                    raise CourseLLMError("Invalid image message content.")
+            validated.append({"role": role, "content": parts})
+            continue
         if role not in ALLOWED_ROLES or not isinstance(content, str) or not content.strip():
             raise CourseLLMError(
                 "each message must have a system, user, or assistant role and non-empty text content."
             )
         validated.append({"role": role, "content": content})
     return validated
+
+
+def _transport_error_message(messages, error):
+    if getattr(error, "status_code", None) in {400, 415, 422} and any(isinstance(item["content"], list) for item in messages):
+        return "The configured model could not read these image attachments. Image input requires a vision-capable model."
+    return "The course model is temporarily unavailable. Please wait a moment and try again."
 
 
 def _create_completion(client: Any, **arguments: Any) -> tuple[Any, dict[str, str]]:
@@ -132,14 +170,18 @@ def _create_completion(client: Any, **arguments: Any) -> tuple[Any, dict[str, st
     Gateways reject what they do not recognise with a 400, so drop one at a time
     rather than all of them at once: a gateway that understands only
     reasoning_effort still gets a usable answer instead of an empty one.
-    Newer OpenAI models may require max_completion_tokens; switch to it only
-    when the API explicitly rejects max_tokens as unsupported.
+    Direct OpenAI requests use max_completion_tokens and skip gateway-only
+    extensions. Other gateways switch token parameters only when rejected.
     """
-    last = len(NO_THINKING_ATTEMPTS) - 1
     arguments = dict(arguments)
+    official_api = urlsplit(str(getattr(client, "base_url", ""))).hostname == "api.openai.com"
+    attempts = NO_THINKING_ATTEMPTS[1:] if official_api else NO_THINKING_ATTEMPTS
+    if official_api and "max_tokens" in arguments:
+        arguments["max_completion_tokens"] = arguments.pop("max_tokens")
+    last = len(attempts) - 1
     position = 0
     while position <= last:
-        hints = NO_THINKING_ATTEMPTS[position]
+        hints = attempts[position]
         try:
             response = client.chat.completions.create(**arguments, **hints)
             request_metadata = {
@@ -221,9 +263,7 @@ def chat(
         raise
     except Exception as exc:
         _notify_completion(on_completion, request_metadata=request_metadata, failure="transport_error")
-        raise CourseLLMError(
-            "The course model is temporarily unavailable. Please wait a moment and try again."
-        ) from exc
+        raise CourseLLMError(_transport_error_message(validated_messages, exc)) from exc
 
     if not response.choices:
         _notify_completion(
@@ -320,9 +360,7 @@ def stream_chat(
         raise
     except Exception as exc:
         report("transport_error")
-        raise CourseLLMError(
-            "The course model is temporarily unavailable. Please wait a moment and try again."
-        ) from exc
+        raise CourseLLMError(_transport_error_message(validated_messages, exc)) from exc
 
 
 def ask(prompt: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> str:

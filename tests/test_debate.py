@@ -16,6 +16,7 @@ from server.gizmoapp_server import create_app, debate_chat, debate_runner, llm
 from server.gizmoapp_server.debate_language import DEFAULT_LANGUAGE_INSTRUCTION
 from server.gizmoapp_server.debate_roles import MAX_AVATAR_SEED, SYSTEM_PROMPT, _validated_roles
 from server.gizmoapp_server.debate_runner import _verified_citations
+from tests.auth_helpers import authenticated_client
 
 
 def make_app(url_prefix: str = ""):
@@ -29,6 +30,7 @@ def make_app(url_prefix: str = ""):
             "SECRET_KEY": "debate-test-secret",
             "AUTO_MIGRATE": True,
             "ENABLED_FEATURES": frozenset(),
+            "ACCOUNT_STARTER_REPLIES": 10000,
         },
         shell_variant="text",
     )
@@ -447,16 +449,16 @@ def fake_synthesis(context, _framing, _perspectives, contributions):
 class AgentDebateApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir, self.app = make_app()
-        self.client = self.app.test_client()
+        self.client = authenticated_client(self.app)
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
     def test_pages_load_directly_and_assets_are_available(self):
         for path in (
-            "/",
-            "/participants",
-            "/debate",
+            "/app",
+            "/app/participants",
+            "/app/debate",
         ):
             with self.subTest(path=path):
                 response = self.client.get(path)
@@ -466,12 +468,12 @@ class AgentDebateApiTests(unittest.TestCase):
                 self.assertNotIn("Mock mode", page)
                 self.assertIn('id="stage-navigation"', page)
                 self.assertIn("/app/text/debate.js", page)
-                self.assertIn('type="module" src="/app/text/debate.js"', page)
-        for path in ("/app/text/debate.js", "/app/text/debate.css"):
+                self.assertRegex(page, r'type="module" src="/app/text/debate\.js(?:\?[^\"]*)?"')
+        for path in ("/app/text/debate.js", "/app/text/debate.css", "/app/text/ui.js", "/app/text/workspace.js", "/app/text/drafts.js", "/app/text/assets/debate-agora-wordmark.png"):
             response = self.client.get(path)
             try:
                 self.assertEqual(response.status_code, 200)
-                if path.endswith("debate.js"):
+                if path == "/app/text/debate.js":
                     script = response.get_data(as_text=True)
                     self.assertIn('data-role-field="identity"', script)
                     self.assertIn('maxlength="96"', script)
@@ -494,6 +496,9 @@ class AgentDebateApiTests(unittest.TestCase):
             names = set(archive.namelist())
         self.assertIn("debate-agora/server/gizmoapp_server/debate_api.py", names)
         self.assertIn("debate-agora/server/gizmoapp_server/static/app/text/debate.js", names)
+        self.assertIn("debate-agora/server/gizmoapp_server/static/app/text/assets/debate-agora-wordmark.png", names)
+        self.assertIn("debate-agora/server/gizmoapp_server/static/app/text/vendor/LUCIDE-LICENSE", names)
+        self.assertIn("debate-agora/server/gizmoapp_server/static/app/text/drafts.js", names)
         self.assertIn("debate-agora/server/gizmoapp_server/templates/index_text.html", names)
         self.assertIn("debate-agora/tests/test_debate.py", names)
         self.assertIn("debate-agora/server/requirements.txt", names)
@@ -555,8 +560,8 @@ class AgentDebateApiTests(unittest.TestCase):
         created = self.client.post("/api/debate/discussions", json=question_payload()).get_json()["discussion"]
         with patch("server.gizmoapp_server.debate_runner.llm.is_configured", return_value=False):
             response = self.client.post(f"/api/debate/discussions/{created['id']}/run")
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("No generated response was created", response.get_json()["errors"][0])
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("retired", response.get_json()["errors"][0])
         saved = self.client.get(f"/api/debate/discussions/{created['id']}").get_json()["discussion"]
         self.assertEqual(saved["contributions"], [])
         self.assertIsNone(saved["synthesis"])
@@ -566,7 +571,7 @@ class AgentDebateApiTests(unittest.TestCase):
         temp_dir, app = make_app("/agent-debate")
         question = "校园旧书交换如何进行一次小规模测试？"
         try:
-            client = app.test_client()
+            client = authenticated_client(app)
             with (
                 patch("server.gizmoapp_server.debate_roles.llm.is_configured", return_value=True),
                 patch(
@@ -1008,8 +1013,12 @@ class AgentDebateApiTests(unittest.TestCase):
             patch("server.gizmoapp_server.debate_runner._request_challenge", side_effect=fake_challenge),
             patch("server.gizmoapp_server.debate_runner._request_synthesis", side_effect=fake_synthesis),
         ):
-            response = self.client.post(run_path)
-            self.assertIn(response.status_code, {200, 202})
+            # The earlier runner remains a storage/unit compatibility test; its public
+            # generation routes are retired so they cannot bypass live allowances.
+            with self.app.app_context():
+                from server.gizmoapp_server.db import get_db
+                started = debate_runner.start_run(self.app, created['id'], created['version'], get_db())
+            self.assertIn(started['status'], {'running', 'completed'})
             deadline = time.monotonic() + 4
             saved = None
             while time.monotonic() < deadline:
@@ -1083,6 +1092,24 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(final_session["draft"], "")
         self.assertEqual(final_session["revision"], 2)
         self.assertFalse(final_session["paused"])
+
+    def test_chat_session_preserves_web_citations_separately_from_user_context(self):
+        payload = chat_session_payload()
+        citations = [{"url": "https://example.org/report", "title": "Transit report", "excerpt": "Ridership increased."}]
+        payload["messages"][0]["citations"] = citations
+        created = self.client.post("/api/debate/sessions", json=payload)
+        self.assertEqual(created.status_code, 201)
+        session_id = created.json["session"]["id"]
+        restored = self.client.get(f"/api/debate/sessions/{session_id}").json["session"]
+        self.assertEqual(restored["messages"][0]["citations"], citations)
+        self.assertNotIn("citations", restored["messages"][1])
+
+    def test_chat_session_rejects_unsafe_citation_urls(self):
+        for url in ("javascript:alert(1)", "data:text/html,hello", "https://user:password@example.org", "https://example.org/\nfoo"):
+            with self.subTest(url=url):
+                payload = chat_session_payload()
+                payload["messages"][0]["citations"] = [{"url": url}]
+                self.assertEqual(self.client.post("/api/debate/sessions", json=payload).status_code, 400)
 
     def test_identity_saves_restores_edits_and_reaches_model_context(self):
         payload = chat_session_payload()
@@ -1263,7 +1290,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(response.get_json()["sourceRevision"], before["revision"])
         self.assertEqual(response.get_json()["summarizedMessageCount"], 5)
         model_chat.assert_called_once()
-        self.assertEqual(model_chat.call_args.kwargs["max_tokens"], 320)
+        self.assertEqual(model_chat.call_args.kwargs["max_tokens"], 650)
         request = model_chat.call_args.args[0]
         self.assertEqual([message["role"] for message in request], ["system", "user"])
         self.assertNotIn("WAITING_FOR_USER", request[0]["content"])
@@ -1281,9 +1308,9 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertNotIn("roleType", json.dumps(context, ensure_ascii=False))
         self.assertNotIn("Private saved prompt", json.dumps(context, ensure_ascii=False))
         self.assertIn(DEFAULT_LANGUAGE_INSTRUCTION, request[0]["content"])
-        self.assertIn("all four concise section labels in the selected output language", request[0]["content"])
+        self.assertIn("four concise sections in the selected output language", request[0]["content"])
         self.assertIn("do not transliterate names to pinyin", request[0]["content"])
-        self.assertIn("150–250 English words by default", request[0]["content"])
+        self.assertIn("100–180 English words by default", request[0]["content"])
         self.assertIn("not a cutoff", request[0]["content"])
         self.assertIn("not Markdown asterisk emphasis", request[0]["content"])
         self.assertIn("rather than restating the opening question in full", request[0]["content"])
@@ -1355,7 +1382,7 @@ class AgentDebateApiTests(unittest.TestCase):
                 "body": "The current role reply has completed.",
             }
             saved = put_snapshot(saved, messages=[*saved["messages"], completed_reply])
-            refreshed = self.app.test_client().get(f"/api/debate/sessions/{session_id}").get_json()["session"]
+            refreshed = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
             self.assertTrue(refreshed["paused"])
             self.assertEqual(refreshed["pendingUserMessages"], [queued])
             self.assertEqual(refreshed["messages"][-1]["body"], completed_reply["body"])
@@ -1487,12 +1514,14 @@ class AgentDebateApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.get_json(),
+            {k: v for k, v in response.get_json().items() if k not in {'message', 'revision'}},
             {
                 "speakerId": "role-2",
                 "selectionMode": "explicit",
                 "fallbackReason": "none",
                 "content": "Test the attendance plan before widening access.",
+                "roundComplete": False,
+                "remaining": 9999,
                 "waitingForUser": False,
                 "replyMode": "plain_text_v1",
             },
@@ -1517,8 +1546,9 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertNotIn("Marked mock must not enter the prompt.", json.dumps(messages_sent, ensure_ascii=False))
 
         after = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-        self.assertEqual(after["revision"], before["revision"])
-        self.assertEqual(after["messages"], before["messages"])
+        self.assertEqual(after["revision"], before["revision"] + 1)
+        self.assertEqual(after["messages"][:-1], before["messages"])
+        self.assertEqual(after["messages"][-1], response.get_json()['message'])
         self.assertEqual(after["participants"][1]["prompt"], "Use the latest saved challenge prompt.")
 
     def test_saved_multi_turn_user_facts_reach_json_and_sse_sdk_requests(self):
@@ -1696,7 +1726,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(sse_context["latestUserMessage"], updated_user_statement)
         self.assertEqual(sse_context["currentUserGoal"], updated_user_statement)
         self.assertEqual(
-            [turn["content"] for turn in sse_context["simulatedAdviserTurns"]], adviser_claims
+            [turn["content"] for turn in sse_context["simulatedAdviserTurns"]], adviser_claims + [json_response.json['content']]
         )
         sse_user_fact_fields = json.dumps(
             {
@@ -1902,7 +1932,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(second_context["latestUserMessage"], no_agreement_message)
         self.assertEqual(second_context["currentUserGoal"], no_agreement_message)
         self.assertEqual(second_context["conversation"][-1]["sourceId"], "saved-message:user-no-agreement")
-        self.assertEqual(second_context["conversation"][-1]["sequence"], 5)
+        self.assertEqual(second_context["conversation"][-1]["sequence"], 6)
         self.assertEqual(second_context["conversation"][-1]["content"], no_agreement_message)
         self.assertEqual(
             second_context["userAuthoredMessages"][-1],
@@ -1914,7 +1944,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(third_context["latestUserMessage"], agreed_not_started_message)
         self.assertEqual(third_context["currentUserGoal"], agreed_not_started_message)
         self.assertEqual(third_context["conversation"][-1]["sourceId"], "saved-message:user-agreed-not-started")
-        self.assertEqual(third_context["conversation"][-1]["sequence"], 7)
+        self.assertEqual(third_context["conversation"][-1]["sequence"], 9)
         self.assertEqual(third_context["conversation"][-1]["content"], agreed_not_started_message)
         self.assertNotIn("executionStatus", third_context["conversation"][-1])
         self.assertNotIn("userConfirmedAssignments", third_context)
@@ -1960,8 +1990,9 @@ class AgentDebateApiTests(unittest.TestCase):
                 f"/api/debate/sessions/{session_id}/reply", json={"participantId": "role-1"}
             )
             self.assertEqual(json_response.status_code, 200, json_response.get_json())
+            sse_session_id = self.client.post("/api/debate/sessions", json=payload).json["session"]["id"]
             sse_response = self.client.post(
-                f"/api/debate/sessions/{session_id}/reply",
+                f"/api/debate/sessions/{sse_session_id}/reply",
                 json={"participantId": "role-2"},
                 headers={"Accept": "text/event-stream"},
             )
@@ -2092,8 +2123,9 @@ class AgentDebateApiTests(unittest.TestCase):
             for line in sse_body.splitlines()
                 if line.startswith("data: ")
         ]
-        self.assertEqual([event["type"] for event in sse_events], ["start", "delta", "done"])
-        self.assertEqual([event["text"] for event in sse_events if event["type"] == "delta"], [repeated])
+        self.assertEqual(sse_events[0]["type"], "start")
+        self.assertEqual(sse_events[-1]["type"], "done")
+        self.assertEqual("".join(event["text"] for event in sse_events if event["type"] == "delta"), repeated)
         model_stream.assert_called_once()
         model_chat.assert_not_called()
 
@@ -2105,9 +2137,9 @@ class AgentDebateApiTests(unittest.TestCase):
         saved = self.client.put(f"/api/debate/sessions/{json_session_id}", json=before_json)
         self.assertEqual(saved.status_code, 200, saved.get_json())
         saved_session = saved.get_json()["session"]
-        self.assertEqual(saved_session["revision"], before_revision + 1)
+        self.assertEqual(saved_session["revision"], before_revision + 2)
         self.assertEqual(sum(message.get("body") == repeated for message in saved_session["messages"]), 2)
-        self.assertEqual(before_sse["messages"], self.client.get(f"/api/debate/sessions/{sse_session_id}").get_json()["session"]["messages"])
+        self.assertEqual(before_sse["messages"], self.client.get(f"/api/debate/sessions/{sse_session_id}").get_json()["session"]["messages"][:-1])
 
     def test_conservative_near_duplicate_match_accepts_new_conditions_and_changed_conclusions(self):
         original = "这周拉个群，找5个同学试发和撮合一笔物品交易，看能否跑通流程并收集反馈。"
@@ -2191,7 +2223,7 @@ class AgentDebateApiTests(unittest.TestCase):
             for line in sse_body.splitlines()
                 if line.startswith("data: ")
         ]
-        self.assertEqual([event["text"] for event in events if event["type"] == "delta"], [near_duplicate])
+        self.assertEqual("".join(event["text"] for event in events if event["type"] == "delta"), near_duplicate)
         self.assertEqual(events[0]["speakerId"], "role-2")
         self.assertEqual(events[-1]["type"], "done")
         stream_model.assert_called_once()
@@ -2286,11 +2318,9 @@ class AgentDebateApiTests(unittest.TestCase):
 
         def save_once(content, role_id, letter):
             session = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-            session["messages"].append({"kind": "participant", "roleId": role_id, "letter": letter, "body": content})
-            session["expectedRevision"] = session["revision"]
-            saved = self.client.put(f"/api/debate/sessions/{session_id}", json=session)
-            self.assertEqual(saved.status_code, 200, saved.get_json())
-            return saved.get_json()["session"]
+            self.assertEqual(session["messages"][-1]["body"], content)
+            self.assertEqual(session["messages"][-1]["roleId"], role_id)
+            return session
 
         with patch("server.gizmoapp_server.debate_chat.llm.chat", return_value=json_content) as model_chat:
             json_response = self.client.post(
@@ -2436,18 +2466,7 @@ class AgentDebateApiTests(unittest.TestCase):
 
         def save_reply(reply):
             session = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-            role = next(person for person in session["participants"] if person["id"] == reply["speakerId"])
-            session["messages"].append(
-                {
-                    "kind": "participant",
-                    "roleId": reply["speakerId"],
-                    "letter": "A",
-                    "body": reply["content"],
-                }
-            )
-            session["expectedRevision"] = session["revision"]
-            saved = self.client.put(f"/api/debate/sessions/{session_id}", json=session)
-            self.assertEqual(saved.status_code, 200, role["name"])
+            self.assertEqual(session["messages"][-1], reply["message"])
 
         with patch("server.gizmoapp_server.debate_chat.llm.chat", side_effect=model_turn) as model_chat:
             first = self.client.post(f"/api/debate/sessions/{session_id}/reply", json={})
@@ -2468,16 +2487,16 @@ class AgentDebateApiTests(unittest.TestCase):
         coordinator_rules = model_chat.call_args_list[0].args[0][0]["content"]
         self.assertIn("short, actionable response task", coordinator_rules)
         self.assertIn("not a topic label, summary, quote, complete sentence answer", coordinator_rules)
-        self.assertIn("Do not select a role just to summarize, echo, or rephrase", coordinator_rules)
-        self.assertIn("not-yet-discussed contribution related to", coordinator_rules)
-        self.assertIn("Agreement is welcome when it adds something useful; do not force opposition", coordinator_rules)
-        self.assertIn("Do not invent user facts, people, numbers, thresholds, gates, or prerequisites", coordinator_rules)
+        self.assertIn("keep the exchange on it", coordinator_rules)
+        self.assertIn("address a concrete claim or objection", coordinator_rules)
+        self.assertIn("Do not manufacture conflict, facts, prior positions, consensus or a winner", coordinator_rules)
+        self.assertIn("Only user-authored entries establish user facts and goals", coordinator_rules)
         role_rules = model_chat.call_args_list[1].args[0][0]["content"]
-        self.assertIn("not a user fact or answer to reproduce", role_rules)
-        self.assertIn("Do not summarize the whole discussion or merely repeat/rephrase a point already covered", role_rules)
-        self.assertIn("When responding to a previous adviser proposal, add a related but not-yet-discussed approach", role_rules)
-        self.assertIn("assess it using this participant's own identity and saved prompt", role_rules)
-        self.assertIn("keep conditions unresolved or frame them as optional suggestions, never necessary gates", role_rules)
+        self.assertIn("unverified suggestion, not a user-authored turn", role_rules)
+        self.assertIn("Do not independently answer the opening question again", role_rules)
+        self.assertIn("respond to a specific thing somebody said", role_rules)
+        self.assertIn("this participant's identity and saved prompt as a viewpoint", role_rules)
+        self.assertIn("never invent a necessary gate", role_rules)
         self.assertEqual(coordinator_inputs[0]["question"], payload["question"])
         self.assertEqual(coordinator_inputs[0]["recentConversation"][-1]["speakerType"], "user")
         self.assertEqual(coordinator_inputs[1]["recentConversation"][-1]["speakerType"], "simulated_adviser")
@@ -2513,7 +2532,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertEqual(len(contexts[1]["conversation"]), 5)
         self.assertEqual(contexts[1]["conversation"][-1]["speakerId"], "role-3")
         system_prompt = model_chat.call_args_list[3].args[0][0]["content"]
-        self.assertIn("Reply to the latest user-authored turn", system_prompt)
+        self.assertIn("An unanswered user turn takes priority", system_prompt)
         self.assertIn("Add one small, useful contribution that is distinct", system_prompt)
 
     def test_saved_multi_turn_proposals_reach_coordinator_and_role_focus_and_explicit_at_bypasses(self):
@@ -2630,7 +2649,8 @@ class AgentDebateApiTests(unittest.TestCase):
         explicit_context = reply_context_from_request(explicit_call.call_args.args[0])
         self.assertEqual(explicit_context["assignedAdvisor"]["identity"], role_two_identity)
         self.assertEqual(explicit_context["assignedAdvisor"]["savedPrompt"], role_two_prompt)
-        self.assertEqual(explicit_context["assignedAdvisorPreviousReplies"][-1]["content"], role_two_previous)
+        self.assertEqual(explicit_context["assignedAdvisorPreviousReplies"][-2]["content"], role_two_previous)
+        self.assertEqual(explicit_context["assignedAdvisorPreviousReplies"][-1]["content"], automatic.get_json()['content'])
         self.assertIsNone(explicit_context["turnGuidance"])
         self.assertNotIn("You coordinate one next turn", explicit_call.call_args.args[0][0]["content"])
 
@@ -2687,16 +2707,7 @@ class AgentDebateApiTests(unittest.TestCase):
 
         def save_reply(reply):
             session = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-            session["messages"].append(
-                {
-                    "kind": "participant",
-                    "roleId": reply["speakerId"],
-                    "letter": "B",
-                    "body": reply["content"],
-                }
-            )
-            session["expectedRevision"] = session["revision"]
-            self.assertEqual(self.client.put(f"/api/debate/sessions/{session_id}", json=session).status_code, 200)
+            self.assertEqual(session["messages"][-1], reply["message"])
 
         reply_text = "The graduate-school comparison no longer fits; direct finance work is the decision now."
         decisions = iter([
@@ -2787,6 +2798,7 @@ class AgentDebateApiTests(unittest.TestCase):
             ),
         ]
         for coordinator_output, reason, private_text in cases:
+            session_id = self.client.post("/api/debate/sessions", json=changed_goal_session_payload()).json["session"]["id"]
             with self.subTest(reason=reason), self.assertLogs(
                 "server.gizmoapp_server.debate_chat", level="WARNING"
             ) as captured, patch(
@@ -3095,18 +3107,6 @@ class AgentDebateApiTests(unittest.TestCase):
         diagnostic_text = json.dumps(diagnostics)
         self.assertNotIn("Discard this first body.", diagnostic_text)
         saved = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-        saved["messages"].append(
-            {
-                "kind": "participant",
-                "roleId": response.get_json()["speakerId"],
-                "letter": "B",
-                "body": response.get_json()["content"],
-            }
-        )
-        saved["expectedRevision"] = saved["revision"]
-        persisted = self.client.put(f"/api/debate/sessions/{session_id}", json=saved)
-        self.assertEqual(persisted.status_code, 200)
-        saved = persisted.get_json()["session"]
         saved_replies = [message["body"] for message in saved["messages"] if message["kind"] == "participant"]
         self.assertEqual(saved_replies.count("Keep this answer once."), 1)
         self.assertNotIn("Discard this first body.", saved_replies)
@@ -3150,12 +3150,14 @@ class AgentDebateApiTests(unittest.TestCase):
             'data: {"type": "start", "speakerId": "role-1", "selectionMode": "explicit", "fallbackReason": "none", "replyMode": "plain_text_v1"}\n\n',
             body,
         )
-        self.assertEqual(body.count('"type": "delta"'), 1)
-        self.assertIn(f'data: {{"type": "delta", "text": "{generated_text}"}}\n\n', body)
-        self.assertIn(
-            'data: {"type": "done", "speakerId": "role-1", "selectionMode": "explicit", "fallbackReason": "none", "waitingForUser": false, "replyMode": "plain_text_v1"}\n\n',
-            body,
-        )
+        chunks = [json.loads(line[6:])["text"] for line in body.splitlines() if line.startswith("data: ") and json.loads(line[6:])["type"] == "delta"]
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), generated_text)
+        done = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")][-1]
+        self.assertEqual(done["type"], "done")
+        self.assertFalse(done["waitingForUser"])
+        self.assertEqual(done["message"]["body"], generated_text)
+        self.assertEqual(done["remaining"], 9999)
         self.assertNotIn("WAITING_FOR_USER", body)
         model_stream.assert_called_once()
         extra_model.assert_not_called()
@@ -3644,7 +3646,7 @@ class AgentDebateApiTests(unittest.TestCase):
     def test_chat_role_reply_sse_respects_url_prefix(self):
         temp_dir, app = make_app("/agent-debate")
         try:
-            client = app.test_client()
+            client = authenticated_client(app)
             created = client.post("/agent-debate/api/debate/sessions", json=chat_session_payload())
             session_id = created.get_json()["session"]["id"]
             with patch(
@@ -3698,20 +3700,7 @@ class AgentDebateApiTests(unittest.TestCase):
 
         def persist_reply(reply, letter):
             session = self.client.get(f"/api/debate/sessions/{session_id}").get_json()["session"]
-            session["messages"].append(
-                {
-                    "kind": "participant",
-                    "roleId": reply["speakerId"],
-                    "letter": letter,
-                    "body": reply["content"],
-                    **({"waitingForUser": True} if reply["waitingForUser"] else {}),
-                }
-            )
-            session["expectedRevision"] = session["revision"]
-            saved = self.client.put(
-                f"/api/debate/sessions/{session_id}", json=session
-            )
-            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(session["messages"][-1], reply["message"])
 
         def reply_as(participant_id):
             response = self.client.post(
@@ -3792,7 +3781,7 @@ class AgentDebateApiTests(unittest.TestCase):
         saved_first_reply = next(message for message in saved_messages if message.get("body") == mock_reply_contents[0])
         self.assertNotIn("waitingForUser", saved_first_reply)
         system_prompt = model_chat.call_args_list[2].args[0][0]["content"]
-        self.assertIn("Reply to the latest user-authored turn", system_prompt)
+        self.assertIn("An unanswered user turn takes priority", system_prompt)
         self.assertIn("Use this participant's identity and saved prompt as a viewpoint", system_prompt)
         self.assertIn("original question and user-authored messages are the only sources for user/project facts", system_prompt)
         self.assertIn("Every assistant/participant message—including your prior replies and coordinator guidance—is that speaker's unconfirmed proposal or claim", system_prompt)
@@ -3802,7 +3791,7 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertIn("Add one small, useful contribution", system_prompt)
         self.assertIn("Never include your own name", system_prompt)
         self.assertIn(DEFAULT_LANGUAGE_INSTRUCTION, system_prompt)
-        self.assertIn("15–40 English words by default", system_prompt)
+        self.assertIn("15–35 English words", system_prompt)
 
     def test_chat_role_reply_rejects_unknown_participant_without_model_call(self):
         created = self.client.post("/api/debate/sessions", json=chat_session_payload())
@@ -3856,7 +3845,7 @@ class AgentDebateApiTests(unittest.TestCase):
     def test_chat_role_reply_route_respects_url_prefix(self):
         temp_dir, app = make_app("/agent-debate")
         try:
-            client = app.test_client()
+            client = authenticated_client(app)
             created = client.post("/agent-debate/api/debate/sessions", json=chat_session_payload())
             session_id = created.get_json()["session"]["id"]
             with patch(
@@ -3916,6 +3905,30 @@ class AgentDebateApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("avatarSeed must be an integer", response.get_json()["errors"][0])
 
+    def test_chat_session_preserves_custom_agent_colors_across_edits(self):
+        payload = chat_session_payload()
+        payload["participants"][0]["avatarColor"] = "#8260A4"
+        created = self.client.post("/api/debate/sessions", json=payload)
+        self.assertEqual(created.status_code, 201, created.get_json())
+        saved = created.get_json()["session"]
+        self.assertEqual(saved["participants"][0]["avatarColor"], "#8260a4")
+        self.assertNotIn("avatarColor", saved["participants"][1])
+        payload["participants"][0]["avatarColor"] = "#347b73"
+        payload["expectedRevision"] = saved["revision"]
+        updated = self.client.put(f"/api/debate/sessions/{saved['id']}", json=payload)
+        self.assertEqual(updated.status_code, 200)
+        restored = self.client.get(f"/api/debate/sessions/{saved['id']}").get_json()["session"]
+        self.assertEqual(restored["participants"][0]["avatarColor"], "#347b73")
+
+    def test_chat_session_rejects_invalid_avatar_colors(self):
+        for color in (None, 123, "#fff", "red", "#123456;background:url(https://example.com)"):
+            with self.subTest(color=color):
+                payload = chat_session_payload()
+                payload["participants"][0]["avatarColor"] = color
+                response = self.client.post("/api/debate/sessions", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("avatarColor", response.get_json()["errors"][0])
+
     def test_chat_session_rejects_stale_revision_without_overwriting_newer_data(self):
         created = self.client.post("/api/debate/sessions", json=chat_session_payload())
         saved = created.get_json()["session"]
@@ -3947,7 +3960,7 @@ class AgentDebateApiTests(unittest.TestCase):
 
         temp_dir, app = make_app("/agent-debate")
         try:
-            client = app.test_client()
+            client = authenticated_client(app)
             created = client.post("/agent-debate/api/debate/sessions", json=chat_session_payload())
             self.assertEqual(created.status_code, 201)
             session_id = created.get_json()["session"]["id"]
@@ -3981,8 +3994,8 @@ class AgentDebateApiTests(unittest.TestCase):
     def test_prefix_applies_to_pages_assets_and_debate_api(self):
         temp_dir, app = make_app("/agent-debate")
         try:
-            client = app.test_client()
-            page = client.get("/agent-debate/debate")
+            client = authenticated_client(app)
+            page = client.get("/agent-debate/app/debate")
             self.assertEqual(page.status_code, 200)
             page_text = page.get_data(as_text=True)
             self.assertIn('<base href="/agent-debate/">', page_text)
@@ -4050,15 +4063,18 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertNotIn("summaryText", snapshot)
         self.assertIn("requestJson(url, options = {})", self.api_js)
 
-    def test_source_download_button_precedes_question_step_and_uses_api_base(self):
-        stepper = self.debate_js[
+    def test_account_menu_replaces_developer_download_without_header_clutter(self):
+        header = self.debate_js[
             self.debate_js.index("function renderStepper()"):
-            self.debate_js.index("function renderQuestion()")
+            self.debate_js.index("function conversationStyle()")
         ]
-        self.assertIn("return `${apiBase()}/debate/source.zip`;", self.debate_js)
-        self.assertIn('download aria-label="Download Debate Agora source code">Download code</a>', stepper)
-        self.assertLess(stepper.index("Download code"), stepper.index('<nav class="stepper"'))
-        self.assertIn("scoped_path(prefix, \"api/debate/source.zip\")", self.debate_api_py)
+        workspace = (Path(__file__).resolve().parents[1] / "server/gizmoapp_server/static/app/text/workspace.js").read_text()
+        self.assertIn('account.menu()', workspace)
+        self.assertNotIn('Download code', workspace)
+        self.assertIn('data-action="toggle-pause"', header)
+        self.assertNotIn("Download code", header)
+        self.assertNotIn('<nav class="stepper"', header)
+        self.assertIn('scoped_path(prefix, "api/debate/source.zip")', self.debate_api_py)
 
     def test_question_composer_keeps_icon_and_omits_routine_status_copy(self):
         question_view = self.debate_js[
@@ -4074,10 +4090,10 @@ class DebateFrontendWiringTests(unittest.TestCase):
             self.debate_js.index("function markSessionConflict(sessionId)")
         ]
 
-        self.assertIn("One clear question for the group.", question_view)
+        self.assertIn("Think it through.", question_view)
         self.assertLess(question_view.index("question-title"), question_view.index("question-input-shell"))
         self.assertIn('<button class="button button-primary build-group-button"', question_view)
-        self.assertIn("<svg viewBox=", question_view)
+        self.assertIn('icon("send")', question_view)
         self.assertIn('class="button-loading-spinner"', question_view)
         self.assertIn('submit.setAttribute("aria-label", buttonLabel);', controls)
         self.assertNotIn("submit.innerHTML", controls)
@@ -4112,7 +4128,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("return sessionApi(`/${encodeURIComponent(sessionId)}/reply`);", self.debate_js)
         self.assertIn('request.headers.get("Accept", "")', self.debate_api_py)
 
-    def test_reply_failure_diagnostics_are_filtered_and_copyable_in_the_error_area(self):
+    def test_reply_diagnostics_are_filtered_but_not_exposed_in_the_error_area(self):
         json_helper = self.api_js[
             self.api_js.index("export async function requestJson("):
             self.api_js.index("export async function requestEventStream(")
@@ -4135,8 +4151,8 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("error.diagnostics = event.diagnostics;", self.debate_js)
         self.assertIn("state.replyDiagnostics = normalizeReplyDiagnostics(diagnostics);", self.debate_js)
         self.assertIn("function formatReplyDiagnostics(value)", self.debate_js)
-        self.assertIn('type="text" data-reply-diagnostic readonly', reply_status)
-        self.assertIn('data-action="copy-reply-diagnostic"', reply_status)
+        self.assertNotIn("data-reply-diagnostic", reply_status)
+        self.assertIn('data-action="retry-role-reply"', reply_status)
         self.assertIn("async function copyReplyDiagnostic()", self.debate_js)
         self.assertIn("if (!state.replyError || !state.replyMessage) {", reply_status)
         self.assertIn("value.requestId", normalizer)
@@ -4293,8 +4309,8 @@ class DebateFrontendWiringTests(unittest.TestCase):
         ]
         self.assertIn("const ROLE_GENERATION_TIMEOUT_MS = 240_000;", self.debate_js)
         self.assertIn("state.roleGenerationPending || state.roleGenerationError", question_view)
-        self.assertIn("Generating three role profiles. A format repair may be needed.", submit)
-        self.assertIn("Saving the generated group…", submit)
+        self.assertNotIn("Finding the right perspectives…", submit)
+        self.assertIn("Preparing your conversation…", submit)
         self.assertIn("state.roleGenerationPending || state.roleGenerationError", sync_controls)
         self.assertIn("ROLE_GENERATION_TIMEOUT_MS", submit)
 
@@ -4312,14 +4328,15 @@ class DebateFrontendWiringTests(unittest.TestCase):
             self.debate_js.index("function roleGenerationErrorMessage(error)"):
             self.debate_js.index("function invalidateRoleGeneration(message")
         ]
-        self.assertIn("error?.diagnostics", role_error_message)
-        self.assertIn("reason: ${reason}", role_error_message)
-        self.assertIn("type: expected ${expectedType}, got ${actualType}", role_error_message)
-        self.assertIn("allowed roleType:", role_error_message)
+        self.assertNotIn("error?.diagnostics", role_error_message)
+        self.assertNotIn("reason: ${reason}", role_error_message)
+        self.assertNotIn("type: expected ${expectedType}, got ${actualType}", role_error_message)
+        self.assertNotIn("allowed roleType:", role_error_message)
+        self.assertIn("Couldn’t create the agents. Try again.", role_error_message)
         self.assertIn("state.roleGenerationMessage = requestPhase === \"generation\"", self.debate_js)
-        self.assertIn("GIZMO_LLM_API_KEY", self.debate_js)
-        self.assertIn("GIZMO_LLM_BASE_URL", self.debate_js)
-        self.assertIn("GIZMO_LLM_MODEL", self.debate_js)
+        self.assertNotIn("GIZMO_LLM_API_KEY", self.debate_js)
+        self.assertNotIn("GIZMO_LLM_BASE_URL", self.debate_js)
+        self.assertNotIn("GIZMO_LLM_MODEL", self.debate_js)
         self.assertIn("state.question === question", self.debate_js)
         self.assertIn("state.roleEditVersion === roleEditVersion", self.debate_js)
         self.assertIn(
@@ -4346,15 +4363,10 @@ class DebateFrontendWiringTests(unittest.TestCase):
             self.debate_js.index("function roleReplyErrorMessage(error)"):
             self.debate_js.index("function showReplyError(message")
         ]
-        self.assertIn('error?.status === 404 && error.message?.includes("Unknown or disabled API route:")', reply_error_handler)
-        self.assertIn("not available in the running preview version", reply_error_handler)
-        self.assertIn("saved session or participant could not be found", reply_error_handler)
-        self.assertIn('error?.message?.includes("still returned an invalid reply control format after one repair")', reply_error_handler)
-        self.assertIn("No participant reply was added; your existing discussion is preserved", reply_error_handler)
-        self.assertIn('error?.message?.includes("The course model returned an incomplete reply control marker.")', reply_error_handler)
-        self.assertIn("This preview is still running the earlier reply-stream code", reply_error_handler)
-        self.assertIn('error?.message === "The server returned an invalid reply control marker."', reply_error_handler)
-        self.assertIn("Refresh or restart the preview, then retry the reply.", reply_error_handler)
+        self.assertIn("This conversation or agent is no longer available.", reply_error_handler)
+        self.assertIn("This reply stopped early.", reply_error_handler)
+        self.assertNotIn("control marker", reply_error_handler)
+        self.assertNotIn("preview version", reply_error_handler)
         self.assertIn("async function requestRoleReply(roleId, initial = false, clearDraft = false)", self.debate_js)
         self.assertIn("async function startDebate()", self.debate_js)
         self.assertIn("async function submitChatMessage()", self.debate_js)
@@ -4413,9 +4425,9 @@ class DebateFrontendWiringTests(unittest.TestCase):
             self.debate_js.index("function roleReplyErrorMessage(error)")
         ]
 
-        self.assertIn("if (mentionIndex < 0) return null;", mention)
+        self.assertIn("return mentionedRole(message, state.roles);", mention)
         self.assertNotIn("state.roles[0]", mention)
-        self.assertIn('message.includes("@") && !role', submit)
+        self.assertIn("Choose an agent from the @ menu", submit)
         self.assertIn("role?.id || null", submit)
         self.assertEqual(loop.count("requestRoleReply("), 1)
         self.assertIn("nextReply = { roleId: null, initial: false };", loop)
@@ -4430,10 +4442,11 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("state.priorityReply = { roleId: role?.id || null, initial: false, clearDraft: true }", submit)
         self.assertIn("state.pendingUserMessages.push(pendingMessage);", submit)
         self.assertIn("if (!await saveSessionNow()) return false;", submit)
-        self.assertIn("if (!state.paused) void ensureDiscussionLoop();", submit)
+        self.assertIn("void ensureDiscussionLoop(null, true);", submit)
+        self.assertIn("state.paused = false;", submit)
         self.assertIn("state.discussionLoopVersion += 1", pause)
         self.assertIn("await saveSessionNow()", pause)
-        self.assertIn("DISCUSSION_TURN_DELAY_MS", self.debate_js)
+        self.assertIn("discussionTurnDelay(state.messages.at(-1)?.body)", self.debate_js)
         self.assertIn("state.pendingUserMessages.shift()", loop)
         self.assertIn("Add one small, useful contribution", self.debate_chat_py)
         self.assertNotIn("selectNextParticipantId", self.debate_js)
@@ -4460,7 +4473,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("const AUTO_CLARIFICATION_WAIT_ENABLED = false;", self.debate_js)
         self.assertIn('typeof event.replyMode !== "string"', reply)
         self.assertIn("state.replyMode = event.replyMode", reply)
-        self.assertIn("Reply mode: ${esc(state.replyMode)}", self.debate_js)
+        self.assertNotIn("Reply mode: ${esc(state.replyMode)}", self.debate_js)
         self.assertIn('typeof event.waitingForUser !== "boolean"', reply)
         self.assertIn("waitingForUser = AUTO_CLARIFICATION_WAIT_ENABLED ? event.waitingForUser : false;", reply)
         self.assertNotIn("Waiting for your answer.", self.debate_js)
@@ -4468,10 +4481,10 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertLess(loop.index("state.pendingUserMessages.shift()"), loop.index("if (state.waitingForUser) return;"))
         self.assertIn("state.waitingForUser = false;", restore)
         self.assertNotIn("state.messages.at(-1)?.waitingForUser", restore)
-        self.assertIn("state.paused = saved.paused;", restore)
-        resume_guard = "if (state.stage === \"debate\" && state.debateStarted && !state.paused && !state.replyError)"
+        self.assertIn("state.paused = saved.paused || state.roundComplete;", restore)
+        resume_guard = "if (state.stage === \"debate\" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn())"
         self.assertIn(resume_guard, restore)
-        self.assertLess(restore.index("state.paused = saved.paused;"), restore.index(resume_guard))
+        self.assertLess(restore.index("state.paused = saved.paused || state.roundComplete;"), restore.index(resume_guard))
         self.assertIn("state.discussionLoopVersion += 1", pause)
         self.assertIn("state.paused = true;", pause)
         self.assertIn("await saveSessionNow()", pause)

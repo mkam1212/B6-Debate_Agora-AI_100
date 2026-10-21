@@ -15,3 +15,13 @@ node_modules/
 *.sqlite3
 *.db
 *.log
+/var/
+/design/
+# Superseded generated assets; retain locally for design history.
+/server/gizmoapp_server/static/app/text/assets/avatars/you-candid-v1.png
+/server/gizmoapp_server/static/app/text/assets/invite-banner-blue-v1.webp
+/server/gizmoapp_server/static/app/text/assets/invite-celadon-light-v2.webp
+/server/gizmoapp_server/static/app/text/assets/invite-conversation-glass-v1.png
+/server/gizmoapp_server/static/app/text/assets/invite-pale-periwinkle-v4.webp
+/server/gizmoapp_server/static/app/text/assets/invite-periwinkle-banner-v3-email.jpg
+/server/gizmoapp_server/static/app/text/assets/invite-periwinkle-banner-v3.webp

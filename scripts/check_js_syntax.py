@@ -5,6 +5,8 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import shutil
+import subprocess
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -141,23 +143,25 @@ def check_js_source(path: Path, source: str) -> list[CheckError]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run a lightweight JavaScript structural check without requiring Node."
+        description="Validate JavaScript with Node's parser without installing packages."
     )
     parser.add_argument("paths", nargs="*", type=Path, help="JavaScript files or directories to check.")
     args = parser.parse_args(argv)
 
     files = iter_js_files(args.paths)
-    errors: list[CheckError] = []
+    node = shutil.which('node')
+    if not node:
+        print('Node.js is required for JavaScript validation. No packages were installed.', file=sys.stderr)
+        return 2
+    failed = False
     for path in files:
-        errors.extend(check_js_source(path, path.read_text(encoding="utf-8")))
-
-    if errors:
-        for error in errors:
-            print(error.format(), file=sys.stderr)
-        print(f"JavaScript structural check failed for {len(files)} file(s). Node was not required.", file=sys.stderr)
+        result = subprocess.run([node, '--check', str(path)], capture_output=True, text=True)
+        if result.returncode:
+            print(result.stderr or result.stdout, file=sys.stderr)
+            failed = True
+    if failed:
         return 1
-
-    print(f"Checked {len(files)} JavaScript file(s) with Python structural checks. Node not required.")
+    print(f"Checked {len(files)} JavaScript file(s) with Node.js.")
     return 0
 
 

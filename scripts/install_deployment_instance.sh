@@ -384,6 +384,16 @@ location = ${URL_PREFIX} {
     return 302 ${URL_PREFIX}/;
 }
 
+location = ${URL_PREFIX}/api/debate/attachments {
+    client_max_body_size 21m;
+    proxy_pass http://127.0.0.1:${PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Prefix ${URL_PREFIX};
+}
+
 location ${URL_PREFIX}/ {
     client_max_body_size 1m;
     proxy_pass http://127.0.0.1:${PORT};

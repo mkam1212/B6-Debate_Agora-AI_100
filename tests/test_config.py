@@ -10,6 +10,37 @@ from server.gizmoapp_server.config import load_feature_intent, load_settings, lo
 
 
 class ConfigTestCase(unittest.TestCase):
+    def test_reply_policy_defaults_and_explicit_overrides(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True):
+            settings = load_settings(repo_root=Path(folder))
+            self.assertEqual(settings["ACCOUNT_STARTER_REPLIES"], 50)
+            self.assertEqual(settings["ACCOUNT_INVITE_REWARD"], 100)
+            with patch.dict(os.environ, {"GIZMO_ACCOUNT_STARTER_REPLIES": "25", "GIZMO_ACCOUNT_INVITE_REWARD": "200"}):
+                settings = load_settings(repo_root=Path(folder))
+                self.assertEqual(settings["ACCOUNT_STARTER_REPLIES"], 25)
+                self.assertEqual(settings["ACCOUNT_INVITE_REWARD"], 200)
+
+    def test_model_settings_from_dotenv_remain_server_side(self):
+        from server.gizmoapp_server import create_app
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / ".env").write_text(
+                "GIZMO_LLM_API_KEY=backend-only-test-key\nGIZMO_LLM_BASE_URL=https://api.openai.com/v1\nGIZMO_LLM_MODEL=gpt-6-luna\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {}, clear=True):
+                settings = load_settings(repo_root=repo_root)
+                self.assertEqual(settings["GIZMO_LLM_API_KEY"], "backend-only-test-key")
+                self.assertEqual(settings["GIZMO_LLM_MODEL"], "gpt-6-luna")
+                self.assertNotIn("GIZMO_LLM_API_KEY", os.environ)
+                app = create_app({"TESTING": True, "DB_PATH": repo_root / "test.sqlite3", "GIZMO_LLM_API_KEY": "backend-only-test-key", "AUTO_MIGRATE": True}, shell_variant="text")
+                client = app.test_client()
+                for route in ("/", "/api/bootstrap"):
+                    response = client.get(route)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertNotIn(b"backend-only-test-key", response.data)
+
     def test_dotenv_overrides_tracked_deploy_defaults_without_mutating_process_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)

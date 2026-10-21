@@ -1,0 +1,149 @@
+/* Shared surfaces and control shapes with /home; the workspace stays warm white. */
+.debate-body {
+  --ink: var(--agora-ink);
+  --muted: var(--agora-muted);
+  --line: var(--agora-line);
+  --page-background: var(--agora-page);
+}
+.workspace-body { background: transparent; }
+.workspace-sidebar {
+  background: linear-gradient(160deg, #faf9f67a, #ffffff3d);
+  border-right-color: #aeb8a033;
+  -webkit-backdrop-filter: var(--agora-glass-filter);
+  backdrop-filter: var(--agora-glass-filter);
+}
+.recent-section, .sidebar-account, .sidebar-login { border-top-color: #9da88f33; }
+.primary-nav button:hover { background: #ffffff70; }
+.recent-item:hover { background: #ffffff66; }
+.recent-item.is-current { background: #ffffff85; box-shadow: inset 0 1px 0 #ffffffb3, 0 1px 5px #46563808; }
+.recent-item.is-current:hover { background: #ffffffb3; }
+.dock-card, .composer-form, .question-form .question-input-shell {
+  border-color: var(--agora-glass-border);
+  background: var(--agora-glass-surface);
+  box-shadow: var(--agora-glass-shadow);
+  -webkit-backdrop-filter: var(--agora-glass-filter);
+  backdrop-filter: var(--agora-glass-filter);
+}
+.question-form .question-input-shell, .composer-form {
+  background: var(--agora-glass-input);
+  box-shadow: var(--agora-input-shadow);
+  -webkit-backdrop-filter: blur(12px) saturate(1.18);
+  backdrop-filter: blur(12px) saturate(1.18);
+}
+.question-form .question-input-shell:focus-within, .composer-form:focus-within {
+  border-color: var(--agora-focus-border);
+  box-shadow: var(--agora-input-shadow);
+}
+.question-suggestions button:hover:enabled, .question-suggestions button:focus-visible { background: #ffffff73; }
+.participant-rail {
+  border-color: #e3e6df;
+  background: linear-gradient(145deg, #ffffff66, #ffffff26);
+  box-shadow: 0 2px 10px #38402e03, inset 0 1px 0 #ffffffa6;
+}
+.role-editor {
+  border-color: #dfe3da;
+  background: linear-gradient(145deg, #ffffffb3, #ffffff66);
+  box-shadow: 0 4px 18px #38402e04, inset 0 1px 0 #ffffffcc;
+}
+.participant-rail .role-choice:hover:enabled { background: #ffffff66; }
+.participant-rail .role-choice.is-selected { border-color: #dce5f180; background: #edf2fab3; box-shadow: none; }
+.participant-rail .role-choice.is-selected:hover:enabled { background: #e9eff9; }
+.pause-button, .share-button, .button-secondary, .button-quiet {
+  border-color: var(--agora-control-border);
+  background: var(--agora-glass-control);
+  box-shadow: inset 0 1px 0 #ffffffb8, 0 2px 8px #353b3208;
+  -webkit-backdrop-filter: var(--agora-glass-control-filter);
+  backdrop-filter: var(--agora-glass-control-filter);
+}
+.button, .auth-dialog .dialog-actions > button, .pause-button, .share-button { border-radius: 999px; }
+.primary-nav button, .recent-item { border-radius: 999px; }
+.role-choice { border-radius: 999px; }
+.select-shell select { border-radius: 999px; }
+.pause-button:hover, .share-button:hover:enabled, .button-secondary:hover:enabled, .button-quiet:hover:enabled { background: #ffffff9e; }
+.icon-button:hover:enabled, .dock-agent-row:hover:enabled { background: #ffffff80; }
+.select-shell select { border: 1px solid var(--agora-control-border); background: #ffffff59; box-shadow: inset 0 1px 0 #ffffffb3; }
+.select-shell option { color: var(--ink); background: var(--agora-page); }
+.field input, .field textarea, .auth-dialog .field input, .search-field, .share-link-field {
+  border-color: #bcc7b380;
+  background: linear-gradient(135deg, #ffffff85, #ffffff47);
+  box-shadow: inset 0 1px 0 #ffffffb3;
+}
+.field input:focus, .field textarea:focus, .auth-dialog .field input:focus, .search-field:focus-within {
+  border-color: var(--agora-focus-border);
+  box-shadow: inset 0 1px 0 #ffffffb3;
+  outline: 0;
+}
+.role-editor > .field { gap: 6px; }
+.role-editor > .field > label { color: #7c8479; font-size: 12px; font-weight: 500; line-height: 18px; }
+.role-editor .field input, .agent-dialog .field input {
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #eef0f380;
+  box-shadow: inset 0 1px 3px #24364a0a, 0 1px 0 #ffffffb3;
+  text-overflow: ellipsis;
+}
+.role-editor .field input:hover, .agent-dialog .field input:hover { background: #e9edf380; }
+.role-editor .field input:focus, .agent-dialog .field input:focus { outline: 0; box-shadow: inset 0 1px 4px #24364a12, 0 1px 0 #ffffffb3; text-overflow: clip; }
+.role-editor .role-prompt-field, .agent-dialog .field:has(textarea) { padding-top: 0; border-top: 0; }
+.role-editor .field textarea, .agent-dialog .field textarea {
+  padding: 12px;
+  min-height: 90px;
+  border: 0;
+  border-radius: 8px;
+  background: #eef0f366;
+  box-shadow: inset 0 1px 3px #24364a0a, 0 1px 0 #ffffffb3;
+  line-height: 1.7;
+}
+.role-editor .field textarea:focus, .agent-dialog .field textarea:focus { outline: 0; box-shadow: inset 0 1px 4px #24364a12, 0 1px 0 #ffffffb3; }
+textarea::placeholder { color: #8a9185; }
+.count-badge { background: #ffffff8c; box-shadow: inset 0 1px 0 #ffffffa6; }
+dialog, .auth-dialog, .benefit-dialog, .workspace-popover, .mention-menu {
+  border-color: var(--agora-glass-border);
+  background: var(--agora-glass-dialog);
+  box-shadow: 0 0 0 1px #7e8b7114, 0 24px 80px #29332226, inset 0 1px 0 #ffffffd9;
+  -webkit-backdrop-filter: blur(28px) saturate(1.15);
+  backdrop-filter: blur(28px) saturate(1.15);
+}
+dialog::backdrop, .auth-dialog::backdrop, .benefit-dialog::backdrop {
+  background: #26312030;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.workspace-popover::backdrop { background: transparent; }
+.popover-item:hover:enabled, a.popover-item:hover, .search-result:hover, .mention-menu button:hover, .web-source:hover { background: #ffffff85; }
+.auth-invitation { border-color: #ffffffb8; background: linear-gradient(120deg, #edf3e580, #ffffff47); box-shadow: inset 0 1px 0 #ffffffb8; }
+.benefit-dialog { border-color: #e5e7e5; background: #fdfdfb; box-shadow: 0 18px 48px #2633461a; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.benefit-dialog::backdrop { background: #25304426; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+.benefit-dialog.invite-dialog, .benefit-dialog.invite-history-dialog, .benefit-dialog.usage-dialog { box-shadow: 0 16px 48px #26334624; }
+.attachment-preview { border-color: #ffffffbd; background: #ffffff73; box-shadow: inset 0 1px 0 #ffffffb8; }
+.attachment-file-icon, .source-number { background: #edf1e88c; }
+.attachment-remove { background: #fafbf7d9; border-color: #cbd4c280; }
+@media (max-width: 1099px) {
+  .details-open .details-dock {
+    border-left: 1px solid var(--agora-glass-border);
+    background: linear-gradient(160deg, #faf9f6c2, #ffffff8c);
+    box-shadow: -12px 0 50px #29332214;
+    -webkit-backdrop-filter: var(--agora-glass-filter);
+    backdrop-filter: var(--agora-glass-filter);
+  }
+  .details-heading { background: transparent; }
+  .details-dock .dock-card { background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .details-dock .select-shell select { background: #ffffff70; }
+}
+@media (max-width: 719px) {
+  .sidebar-open .workspace-sidebar { background: linear-gradient(160deg, #faf9f6c2, #ffffff8c); }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .workspace-sidebar, .dock-card, .composer-form, .question-form .question-input-shell,
+  dialog, .auth-dialog, .benefit-dialog, .workspace-popover, .mention-menu { background: #fafbf7f2; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .workspace-sidebar, .sidebar-open .workspace-sidebar, .details-open .details-dock,
+  .dock-card, .composer-form, .question-form .question-input-shell,
+  dialog, .auth-dialog, .benefit-dialog, .workspace-popover, .mention-menu {
+    background: #fafbf7;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

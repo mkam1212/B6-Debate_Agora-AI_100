@@ -1,4 +1,12 @@
-import { requestEventStream, requestJson } from "../api.js";
+import { consumeStartIntent, rememberStartIntent } from "./start-flow.js?v=allowance-78";
+import { requestEventStream, requestJson } from "../api.js?v=flow-77";
+import { icon, initials, agentName, avatar, avatarStyle, avatarColorPicker, randomAvatarColor, isAvatarColor } from "./ui.js?v=allowance-78";
+import { createWorkspace } from "./workspace.js?v=delivery-80";
+import { renderSummaryCopy } from "./summary-view.js?v=allowance-78";
+import { trustedCitations, renderCitedText, streamingText } from "./sources.js?v=web-75";
+import { isDialogBackdropClick, mentionAtCaret, mentionedRole, insertRoleMention, discussionTurnDelay, CONVERSATION_STYLES, withConversationStyle } from "./interaction-utils.js?v=nav-73";
+import { rememberDraft, recoverDraft, acknowledgeDraft } from "./drafts.js";
+import { rememberAttachments, recoverAttachments, acknowledgeAttachments, attachmentIds } from "./attachment-utils.js";
 
 const runtime = window.GizmoAppRuntime;
 const appView = document.getElementById("app-view");
@@ -7,6 +15,8 @@ const summaryDialog = document.getElementById("summary-dialog");
 const baseElement = document.querySelector("base");
 const configuredPath = new URL(baseElement.href, window.location.href).pathname;
 const BASE_PATH = configuredPath.endsWith("/") ? configuredPath : `${configuredPath}/`;
+
+const APP_PATH = `${BASE_PATH}app`;
 
 const AVATARS = ["🧭", "🔎", "🌱", "⚖️", "💡", "🪨"];
 const ROLE_TYPES = ["Analyst", "Challenger", "Builder", "Skeptic", "Synthesizer"];
@@ -26,7 +36,6 @@ const RECENT_GENERATED_NAMES_KEY = "debate-recent-generated-names-v1";
 const AUTO_CLARIFICATION_WAIT_ENABLED = false;
 const ROLE_GENERATION_TIMEOUT_MS = 240_000;
 const ROLE_REPLY_TIMEOUT_MS = 120_000;
-const DISCUSSION_TURN_DELAY_MS = 900;
 const STREAM_CHUNK_DELAY_MS = 24;
 const MESSAGE_LIST_BOTTOM_THRESHOLD_PX = 96;
 const REPLY_DIAGNOSTIC_VERSION = "debate_reply_diag_v2";
@@ -65,6 +74,15 @@ const DEFAULT_ROLES = [
     roleType: "Synthesizer",
   },
 ];
+
+function defaultRoles() {
+  const colors = [];
+  return DEFAULT_ROLES.map(role => {
+    const avatarColor = randomAvatarColor(colors);
+    colors.push(avatarColor);
+    return { ...role, avatarColor };
+  });
+}
 
 const esc = (value) => String(value ?? "")
   .replaceAll("&", "&amp;")
@@ -139,8 +157,8 @@ function formatReplyDiagnostics(value) {
 
 function stageFromLocation() {
   const pathname = window.location.pathname;
-  const relative = pathname.startsWith(BASE_PATH)
-    ? pathname.slice(BASE_PATH.length).replace(/\/+$/, "")
+  const relative = pathname.startsWith(`${APP_PATH}/`)
+    ? pathname.slice(APP_PATH.length + 1).replace(/\/+$/, "")
     : "";
   return ["participants", "debate"].includes(relative) ? relative : "question";
 }
@@ -151,6 +169,16 @@ function sessionIdFromLocation() {
 
 const state = {
   stage: stageFromLocation(),
+  readOnly: Boolean(new URLSearchParams(location.search).get("share")),
+  archived: false,
+  title: "",
+  access: "owner",
+  legacyLinkActive: false,
+  sharingEnabled: false,
+  autoSummaryPending: false,
+  roundComplete: false,
+  replyAbort: null,
+  restoreSequence: 0,
   sessionId: sessionIdFromLocation(),
   summarySessionId: "",
   savedParticipantReplyCount: 0,
@@ -158,15 +186,17 @@ const state = {
   summaryLoading: false,
   summaryError: "",
   summaryText: "",
+  summaryFeedback: null,
   summarySourceRevision: null,
   summaryMessageCount: 0,
   summaryDirty: false,
   summaryRequestSequence: 0,
   summaryContentVersion: 0,
   question: "",
-  roles: DEFAULT_ROLES.map((role) => ({ ...role })),
+  roles: defaultRoles(),
   selectedRoleId: "role-1",
   groupBuilt: false,
+  customizeFirst: false,
   debateStarted: false,
   paused: false,
   waitingForUser: false,
@@ -176,7 +206,11 @@ const state = {
   unsavedMessageIds: new Set(),
   streamingReply: null,
   composeDraft: "",
+  draftAttachments: [],
   mentionOpen: false,
+  mentionQuery: "",
+  mentionRange: null,
+  mentionActiveIndex: 0,
   nextRoleId: 4,
   saveTimer: null,
   saveQueue: Promise.resolve(),
@@ -202,18 +236,28 @@ const state = {
   replyMode: "",
   replyDiagnostics: null,
   replyRetryTarget: null,
+  failedReplyBody: "",
+  replyBlockedBySave: false,
   discussionLoopTask: null,
   discussionLoopVersion: 0,
   restartDiscussionAfterTask: false,
   priorityReply: null,
+  pendingConversationStyle: "",
 };
+
+function draftStorage() {
+  try { return window.sessionStorage; } catch { return null; }
+}
+function draftKey(sessionId = state.sessionId) {
+  return `agora-unsent:${BASE_PATH}:${sessionId}`;
+}
+function rememberComposeDraft() {
+  if (state.sessionId) rememberDraft(draftStorage(), draftKey(), state.composeDraft, state.sessionRevisions.get(state.sessionId));
+  rememberAttachments(draftStorage(), draftKey(state.sessionId || "new"), state.draftAttachments, state.sessionId ? state.sessionRevisions.get(state.sessionId) : 0);
+}
 
 function apiBase() {
   return runtime.readConfig().apiBase.replace(/\/$/, "");
-}
-
-function sourceArchiveApi() {
-  return `${apiBase()}/debate/source.zip`;
 }
 
 function sessionApi(path = "") {
@@ -279,6 +323,7 @@ function normalizeGeneratedRoles(payload) {
   const seenIds = new Set();
   const seenNames = new Set();
   const seenTypes = new Set();
+  const colors = [];
   return payload.roles.map((role) => {
     if (!role || typeof role !== "object" || Array.isArray(role)) {
       throw new Error("The role response contains an invalid participant.");
@@ -310,59 +355,22 @@ function normalizeGeneratedRoles(payload) {
     seenIds.add(id);
     seenNames.add(normalizedName);
     seenTypes.add(roleType);
+    const avatarColor = randomAvatarColor(colors);
+    colors.push(avatarColor);
     return {
       ...role,
       identity: identity.trim(),
       avatar: AVATARS[avatarSeed % AVATARS.length],
+      avatarColor,
     };
   });
 }
 
 function roleGenerationErrorMessage(error) {
-  const detail = error instanceof Error ? error.message.toLowerCase() : "";
-  const diagnostic = error?.diagnostics && typeof error.diagnostics === "object" ? error.diagnostics : {};
-  const safeReasons = new Set([
-    "invalid_response_type", "invalid_json", "invalid_top_level_shape", "invalid_roles_type",
-    "invalid_role_count", "invalid_role_type", "invalid_role_fields", "invalid_field_type",
-    "empty_field", "field_too_long", "time_bound_quantity", "duplicate_name", "duplicate_prompt",
-    "invalid_enum", "duplicate_enum", "field_out_of_range", "model_truncated", "model_error",
-  ]);
-  const safeFields = new Set(["response", "roles", "name", "identity", "roleType", "prompt", "avatarSeed"]);
-  const safeTypes = new Set(["string", "integer", "number", "boolean", "array", "object", "null"]);
-  const reason = safeReasons.has(diagnostic.reason) ? diagnostic.reason : "";
-  const field = safeFields.has(diagnostic.field) ? diagnostic.field : "";
-  const expectedType = safeTypes.has(diagnostic.expectedType) ? diagnostic.expectedType : "";
-  const actualType = safeTypes.has(diagnostic.actualType) ? diagnostic.actualType : "";
-  const finishReason = ["stop", "length", "content_filter", "tool_calls", "function_call", "other", "unknown"]
-    .includes(diagnostic.finishReason)
-    ? diagnostic.finishReason
-    : "";
-  const outputChars = Number.isSafeInteger(diagnostic.outputChars) && diagnostic.outputChars >= 0
-    ? diagnostic.outputChars
-    : null;
-  const allowedRoleTypes = Array.isArray(diagnostic.allowedValues)
-    ? diagnostic.allowedValues.filter((value) => ROLE_TYPES.includes(value))
-    : [];
-  const diagnosticParts = [
-    reason && `reason: ${reason}`,
-    field && `field: ${field}`,
-    expectedType && actualType && `type: expected ${expectedType}, got ${actualType}`,
-    allowedRoleTypes.length && `allowed roleType: ${allowedRoleTypes.join(", ")}`,
-    finishReason && `finish: ${finishReason}`,
-    outputChars !== null && `output characters: ${outputChars}`,
-  ].filter(Boolean);
-  if (error?.status === 503 && /not configured|not set|missing|required environment variable/.test(detail)) {
-    return "AI role generation is not configured. Ask the server owner to set GIZMO_LLM_API_KEY, GIZMO_LLM_BASE_URL, and GIZMO_LLM_MODEL.";
-  }
-  if (error?.status === 503 && reason === "model_truncated") {
-    return `AI role generation was truncated (${diagnosticParts.join(", ")}). Please try again.`;
-  }
-  if (error?.status === 503) return "AI role generation is temporarily unavailable. Please try again.";
-  if (error?.status === 502) {
-    const suffix = diagnosticParts.length ? ` (${diagnosticParts.join(", ")})` : "";
-    return `The AI returned an unusable role format${suffix}. Please try again.`;
-  }
-  return "Could not build the group. Please try again.";
+  if (error?.status === 401) return "Log in to create your agents.";
+  if (/timed out|timeout/i.test(error?.message || "")) return "This is taking longer than usual. Try again.";
+  if (error?.status === 503) return "AI agents are temporarily unavailable. Try again.";
+  return "Couldn’t create the agents. Try again.";
 }
 
 function invalidateRoleGeneration(message = "The previous response will be ignored.") {
@@ -415,6 +423,7 @@ function sessionSnapshot() {
     messages: state.messages.map((message) => ({ ...message })),
     pendingUserMessages: state.pendingUserMessages.map((message) => ({ ...message })),
     draft: state.composeDraft,
+    draftAttachments: state.draftAttachments.map(item => ({ ...item })),
     debateStarted: state.debateStarted,
     paused: state.paused,
   };
@@ -447,6 +456,7 @@ function resetSummaryForSession(sessionId) {
   state.summaryLoading = false;
   state.summaryError = "";
   state.summaryText = "";
+  state.summaryFeedback = null;
   state.summarySourceRevision = null;
   state.summaryMessageCount = 0;
   state.summaryDirty = false;
@@ -466,14 +476,18 @@ function setSaveStatus(message, failed = false) {
     render();
     return;
   }
-  node.textContent = message;
+  node.innerHTML = saveStatusContent();
   node.setAttribute("role", "alert");
   node.classList.add("is-error");
 }
 
 function renderSaveStatus() {
   if (!state.saveFailed || !state.saveStatus) return "";
-  return `<p class="save-status is-error" data-save-status role="alert">${esc(state.saveStatus)}</p>`;
+  return `<div class="save-status save-notice is-error" data-save-status role="alert">${saveStatusContent()}</div>`;
+}
+function saveStatusContent() {
+  const conflict = state.conflictedSessions.has(state.sessionId);
+  return `<div><p>${esc(state.saveStatus)}</p><span>${conflict ? "Copy any unsaved replies before reopening the conversation." : "Your unsent draft is kept on this device."}</span></div>${!conflict ? '<button class="dialog-text-button" type="button" data-action="retry-save">Try again</button>' : ""}`;
 }
 
 function markSessionConflict(sessionId) {
@@ -484,19 +498,22 @@ function markSessionConflict(sessionId) {
     state.saveTimer = null;
   }
   setSaveStatus(
-    "Another tab saved a newer version. Your local changes are still visible but were not saved. Automatic saving has stopped.",
+    "This conversation changed in another tab.",
     true,
   );
 }
 
 async function saveSessionNow() {
   const sessionId = state.sessionId;
+  if (state.readOnly) return true;
   if (!sessionId || state.conflictedSessions.has(sessionId)) return false;
   if (state.saveTimer !== null) {
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
   }
   const sequence = ++state.saveSequence;
+  state.saveErrorStatus = 0;
+  const ownerId = workspace.profile()?.id;
   const snapshot = sessionSnapshot();
   const snapshotMessageIds = new Set([
     ...snapshot.messages.map((message) => message.id).filter(Boolean),
@@ -504,6 +521,7 @@ async function saveSessionNow() {
   ]);
   setSaveStatus("");
   const operation = state.saveQueue.then(async () => {
+    if (!workspace.isSignedIn() || workspace.profile()?.id !== ownerId) return "cancelled";
     if (state.conflictedSessions.has(sessionId)) return "conflicted";
     const expectedRevision = state.sessionRevisions.get(sessionId);
     try {
@@ -511,13 +529,19 @@ async function saveSessionNow() {
         sessionApi(`/${encodeURIComponent(sessionId)}`),
         jsonOptions("PUT", { ...snapshot, expectedRevision }),
       );
+      if (!workspace.isSignedIn() || workspace.profile()?.id !== ownerId) return "cancelled";
       state.sessionRevisions.set(sessionId, result.session.revision);
+      if (state.sessionId === sessionId && result.session.paused) state.paused = true;
+      workspace.recordSession(result.session);
+      acknowledgeDraft(draftStorage(), draftKey(sessionId), result.session.draft, result.session.revision);
+      acknowledgeAttachments(draftStorage(), draftKey(sessionId), result.session.draftAttachments, result.session.revision);
       if (state.sessionId === sessionId) {
         state.savedParticipantReplyCount = countSavedParticipantReplies(result.session.messages);
       }
       for (const messageId of snapshotMessageIds) state.unsavedMessageIds.delete(messageId);
       return "saved";
     } catch (error) {
+      state.saveErrorStatus = error?.status || 0;
       if (error?.status === 409) markSessionConflict(sessionId);
       throw error;
     }
@@ -533,10 +557,11 @@ async function saveSessionNow() {
     updatePendingSaveLabels();
     return outcome === "saved";
   } catch (error) {
+    if (state.sessionId !== sessionId || !workspace.isSignedIn() || workspace.profile()?.id !== ownerId) return false;
     if (error?.status === 409) {
       markSessionConflict(sessionId);
     } else if (sequence === state.saveSequence) {
-      setSaveStatus(`Could not save this session. ${error instanceof Error ? error.message : "Try again."}`, true);
+      setSaveStatus("Changes haven’t been saved.", true);
     }
     return false;
   }
@@ -547,8 +572,6 @@ function updatePendingSaveLabels() {
     const messageId = node.dataset.messageSaveId;
     if (state.unsavedMessageIds.has(messageId)) {
       node.textContent = state.saveFailed ? "Not saved" : "Saving…";
-    } else if (state.pendingUserMessages.some((message) => message.id === messageId)) {
-      node.textContent = "Saved · queued";
     } else {
       node.remove();
     }
@@ -556,7 +579,7 @@ function updatePendingSaveLabels() {
 }
 
 function scheduleSessionSave(immediate = false) {
-  if (!state.sessionId || state.conflictedSessions.has(state.sessionId)) return;
+  if (state.readOnly || !state.sessionId || state.conflictedSessions.has(state.sessionId)) return;
   if (state.saveTimer !== null) {
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
@@ -578,83 +601,92 @@ function roleById(id) {
 }
 
 function renderStepper() {
-  const steps = [
-    ["question", "Question", true],
-    ["participants", "Participants", state.groupBuilt && Boolean(state.question.trim())],
-    ["debate", "Debate", state.debateStarted],
-  ];
-  return `<div class="stage-navigation-row"><a class="button button-quiet source-download-button" href="${esc(sourceArchiveApi())}" download aria-label="Download Debate Agora source code">Download code</a><nav class="stepper" aria-label="Debate stages"><ol>${steps.map(([stage, label, enabled], index) => {
-    const current = state.stage === stage;
-    const complete = (stage === "question" && state.groupBuilt) || (stage === "participants" && state.debateStarted);
-    const canNavigate = enabled && !state.roleGenerationPending && !state.replyPending;
-    return `<li><button class="step-item${current ? " is-current" : ""}${complete ? " is-complete" : ""}" type="button" data-action="go-stage" data-stage="${stage}" aria-current="${current ? "step" : "false"}" ${canNavigate ? "" : "disabled"}><span class="step-number">0${index + 1}</span><span>${label}</span></button></li>`;
-  }).join("")}</ol></nav></div>`;
+  if (state.restoreFailed) return `<div class="header-content"><span></span></div>`;
+  const title = state.stage === "question" ? "" : state.title || state.question;
+  return `<div class="header-content"><button class="icon-button mobile-menu" data-workspace="menu" aria-label="Open sidebar" aria-controls="workspace-sidebar" aria-expanded="${document.body.classList.contains("sidebar-open")}">${icon("menu")}</button>
+    ${state.stage === "participants" ? `<button class="icon-button setup-back" data-action="go-stage" data-stage="question" aria-label="Edit question" ${state.replyPending ? "disabled" : ""}>${icon("back")}</button>` : ""}
+    ${title ? `<h1 id="debate-title" class="workspace-title" title="${esc(title)}">${esc(title)}</h1>` : '<span class="workspace-title"></span>'}
+    <div class="header-tools">${state.stage === "debate" && !state.readOnly ? `<button class="pause-button" type="button" data-action="toggle-pause" aria-pressed="${state.paused}">${icon(state.paused ? "play" : "pause")}<span>${state.paused ? "Resume" : "Pause"}</span></button>` : ""}
+    ${state.stage === "participants" ? `<button class="button button-primary setup-start" type="button" data-action="${state.debateStarted ? "return-debate" : "start-debate"}" ${state.roles.length && state.question.trim() && !state.replyPending ? "" : "disabled"}>${state.debateStarted ? "Return to debate" : "Start debate"}</button>` : ""}
+    ${state.stage === "debate" ? `<button class="icon-button mobile-panels" data-workspace="panels" aria-label="Show debate details" aria-controls="debate-details" aria-expanded="${document.body.classList.contains("details-open")}">${icon("panel")}</button>` : ""}</div></div>`;
+}
+
+function conversationStyle() {
+  return state.pendingConversationStyle || /\n\n\[Conversation style: (\w+)\]/.exec(state.roles[0]?.prompt || "")?.[1] || "Balanced";
+}
+function renderDock() {
+  const canEdit = !state.readOnly && state.groupBuilt && !state.replyPending && !state.roleGenerationPending;
+  const profile = workspace.profile();
+  return `<aside id="debate-details" class="details-dock" aria-label="Debate details">
+    <div class="drawer-heading details-heading"><h2>Debate details</h2><button class="icon-button drawer-close" data-workspace="close-drawers" aria-label="Close debate details">${icon("close")}</button></div>
+    <section class="dock-card room-card" aria-label="Sharing and participants">
+      <div class="room-top"><span class="room-mode">${state.readOnly ? 'View only' : state.sharingEnabled ? 'Link sharing on' : 'Private debate'}</span>${!state.readOnly ? `<button class="share-button" data-workspace="share" ${state.sessionId ? "" : "disabled"}>${icon("share")}Share</button>` : ''}</div>
+      ${state.readOnly ? '<p class="viewer-meta">Shared conversation · Updates live</p>' : `<div class="people-stack" aria-label="1 person: ${esc(profile.name)}"><span title="${esc(profile.name)}">${avatar(profile)}</span></div>`}
+    </section>
+    <section class="dock-card agents-card" aria-labelledby="agents-title">
+      <div class="card-heading"><h2 id="agents-title">Agents <span class="count-badge">${state.roles.length}</span></h2></div><p class="agent-transparency" title="These are simulated perspectives using a shared AI model. Agreement between agents is not independent verification.">AI perspectives · shared model</p>
+      <ul class="dock-agents">${state.roles.map((role, index) => `<li>${state.readOnly ? '<div class="dock-agent-row viewer-agent">' : `<button class="dock-agent-row" data-action="edit-agents" data-role-id="${esc(role.id)}" aria-label="Edit ${esc(agentName(role))}" ${canEdit ? "" : "disabled"}>`}${avatar(role, index)}<span class="dock-agent-copy"><strong data-role-name="${esc(role.id)}">${esc(agentName(role))}</strong><span data-role-identity="${esc(role.id)}">${esc(roleIdentityLabel(role))}</span></span>${state.readOnly ? '</div>' : `${icon("more")}</button>`}</li>`).join("")}</ul>
+      ${!state.readOnly ? `<button class="add-agent" data-action="dock-add-role" ${canEdit && state.roles.length < MAX_PARTICIPANTS ? "" : "disabled"}>${icon("plus")}Add agent</button>` : ''}
+      <div class="style-control"><label for="conversation-style">Conversation style</label><div class="select-shell"><select id="conversation-style" data-conversation-style ${state.groupBuilt && !state.readOnly ? "" : "disabled"}>${Object.keys(CONVERSATION_STYLES).map(style => `<option ${conversationStyle() === style ? "selected" : ""}>${style}</option>`).join("")}</select>${icon("right")}</div></div>
+    </section>
+    <section class="dock-card resources-card" aria-label="Conversation resources">
+      <button data-action="summary" ${summaryActionDisabled() ? "disabled" : ""} title="${esc(summaryWaitMessage() || "Summarize this debate")}">${icon("document")}<span>${state.summaryLoading ? "Summarizing…" : "Summary"}</span>${icon("right")}</button>
+      <button data-workspace="sources">${icon("link")}<span>Sources <span class="count-badge">${workspace.sources().length}</span></span>${icon("right")}</button>
+    </section>
+  </aside>`;
 }
 
 function renderQuestion() {
   const status = state.roleGenerationPending || state.roleGenerationError ? state.roleGenerationMessage : "";
   return `<section class="screen question-screen" aria-labelledby="question-title">
-    <form class="question-form" data-form="question" aria-busy="${state.roleGenerationPending}">
-      <h1 id="question-title" class="screen-intro">One clear question for the group.</h1>
+    <form class="question-form" id="question-form" data-form="question" aria-busy="${state.roleGenerationPending}">
+      <h1 id="question-title" class="screen-intro">Think it through.</h1>
+      <p class="question-intro">A question worth seeing from more than one side.</p>
       <label class="sr-only" for="question-input">Your question</label>
       <div class="question-input-shell">
-        <textarea id="question-input" name="question" data-field="question" maxlength="2000" required placeholder="For example: Should our team move to a four-day workweek?" ${state.roleGenerationPhase === "saving" ? "disabled" : ""}>${esc(state.question)}</textarea>
-        <button class="button button-primary build-group-button" type="submit" aria-label="Build the group" ${state.question.trim() && !state.roleGenerationPending ? "" : "disabled"}>
+        ${workspace.renderAttachments(state.draftAttachments, true)}
+        <textarea id="question-input" name="question" data-field="question" maxlength="2000" required placeholder="A decision, an idea, a question…" ${state.roleGenerationPhase === "saving" ? "disabled" : ""}>${esc(state.question)}</textarea>
+        <div class="question-composer-footer"><div class="composer-tools"><button class="icon-button" type="button" data-attachment-action="images" aria-label="Upload images (up to 6)">${icon("plus")}</button><button class="icon-button" type="button" data-attachment-action="files" aria-label="Upload files">${icon("paperclip")}</button><button class="icon-button customize-agents-button${state.customizeFirst ? " is-active" : ""}" type="button" data-action="customize-first" aria-label="Customize agents" title="${state.customizeFirst ? "Customize agents: on" : "Customize agents: off"}" aria-pressed="${state.customizeFirst}" ${state.roleGenerationPending ? "disabled" : ""}>${icon("agent-customize")}</button></div><button class="button button-primary build-group-button" type="submit" aria-label="Start conversation" ${state.question.trim() && !state.roleGenerationPending && !workspace.uploading() ? "" : "disabled"}>
           ${state.roleGenerationPending
             ? '<span class="button-loading-spinner" aria-hidden="true"></span>'
-            : '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></svg>'}
-        </button>
+            : icon("send")}
+        </button></div>
       </div>
       ${status ? `<p class="role-generation-status${state.roleGenerationError ? " is-error" : ""}" data-role-generation-status role="${state.roleGenerationError ? "alert" : "status"}">${esc(status)}</p>` : ""}
     </form>
+    ${workspace.renderSuggestions()}
   </section>`;
 }
 
 function renderRoleList() {
-  return state.roles.map((role) => {
+  return state.roles.map((role, index) => {
     const selected = role.id === state.selectedRoleId;
     return `<li><button class="role-choice${selected ? " is-selected" : ""}" type="button" data-action="select-role" data-role-id="${esc(role.id)}" aria-pressed="${selected}" ${state.replyPending ? "disabled" : ""}>
-      <span class="role-avatar" data-role-avatar="${esc(role.id)}" aria-hidden="true">${esc(role.avatar)}</span>
-      <span class="role-choice-copy"><strong data-role-name="${esc(role.id)}">${esc(role.name || "Unnamed participant")}</strong><span data-role-identity="${esc(role.id)}">${esc(roleIdentityLabel(role))}</span></span>
+      ${avatar(role, index)}
+      <span class="role-choice-copy"><strong data-role-name="${esc(role.id)}">${esc(agentName(role))}</strong><span data-role-identity="${esc(role.id)}">${esc(roleIdentityLabel(role))}</span></span>
     </button></li>`;
   }).join("");
 }
 
-function renderAvatarChoices(role) {
-  return AVATARS.map((avatar) => {
-    const selected = role.avatar === avatar;
-    return `<button class="avatar-choice${selected ? " is-selected" : ""}" type="button" data-action="set-avatar" data-avatar="${esc(avatar)}" aria-label="Choose avatar ${esc(avatar)}" aria-pressed="${selected}" ${state.replyPending ? "disabled" : ""}>${esc(avatar)}</button>`;
-  }).join("");
-}
 
 function renderRoleEditor(role) {
   return `<section class="role-editor" aria-label="Edit selected participant">
-    <div class="editor-heading"><h2 data-selected-role-name>${esc(role.name || "Unnamed participant")}</h2></div>
-    <fieldset class="avatar-field"><legend>Avatar</legend><div class="avatar-picker">${renderAvatarChoices(role)}</div></fieldset>
+    <div class="editor-heading"><div class="editor-identity">${avatar(role, state.roles.indexOf(role))}<h2 data-selected-role-name>${esc(role.name || "Unnamed participant")}</h2></div><button class="icon-button remove-agent-button" type="button" data-action="remove-role" aria-label="Remove agent" title="Remove agent" ${state.roles.length <= 1 || state.replyPending ? "disabled" : ""}>${icon("trash")}</button></div>
     <div class="field"><label for="role-name">Name</label><input id="role-name" type="text" data-role-field="name" maxlength="48" value="${esc(role.name)}" placeholder="Participant name" ${state.replyPending ? "disabled" : ""}></div>
-    <div class="field"><label for="role-identity">Identity</label><input id="role-identity" type="text" data-role-field="identity" maxlength="96" value="${esc(role.identity || "")}" placeholder="Specific identity; blank for older roles" ${state.replyPending ? "disabled" : ""}></div>
-    <div class="field"><label for="role-prompt">Prompt</label><textarea id="role-prompt" data-role-field="prompt" rows="6" maxlength="1000" placeholder="How should this participant think and contribute?" ${state.replyPending ? "disabled" : ""}>${esc(role.prompt)}</textarea></div>
-    <div class="editor-actions"><button class="button button-quiet button-danger" type="button" data-action="remove-role" ${state.roles.length <= 1 || state.replyPending ? "disabled" : ""}>Remove participant</button></div>
+    <div class="field"><label for="role-identity">Perspective</label><input id="role-identity" type="text" data-role-field="identity" maxlength="96" value="${esc(role.identity || "")}" placeholder="e.g. Optimist, economist, product designer" ${state.replyPending ? "disabled" : ""}></div>
+    ${avatarColorPicker(role, state.roles.indexOf(role), { disabled: state.replyPending })}
+    <div class="field role-prompt-field"><label for="role-prompt">Personality & instructions</label><textarea id="role-prompt" data-role-field="prompt" rows="6" maxlength="1000" placeholder="How should this participant think and contribute?" ${state.replyPending ? "disabled" : ""}>${esc(role.prompt)}</textarea></div>
   </section>`;
 }
 
 function renderReplyStatus() {
   if (!state.replyError || !state.replyMessage) {
-    return state.replyMode
-      ? `<div class="role-generation-status" data-reply-status role="status">Reply mode: ${esc(state.replyMode)}</div>`
-      : "";
+    return "";
   }
-  const replyModeMarkup = state.replyMode
-    ? `<span class="reply-mode" data-reply-mode>Reply mode: ${esc(state.replyMode)}</span>`
-    : "";
-  const diagnosticText = formatReplyDiagnostics(state.replyDiagnostics);
-  const diagnosticMarkup = diagnosticText
-    ? `<div class="reply-diagnostic"><label for="reply-diagnostic-text">Safe diagnostic to share</label><div class="reply-diagnostic-controls"><input id="reply-diagnostic-text" type="text" data-reply-diagnostic readonly value="${esc(diagnosticText)}"><button class="button button-quiet" type="button" data-action="copy-reply-diagnostic">Copy</button></div><span class="reply-diagnostic-copy-status" data-reply-diagnostic-copy-status aria-live="polite"></span></div>`
-    : "";
   const retryButton = state.replyRetryTarget
-    ? `<button class="button button-quiet" type="button" data-action="retry-role-reply" ${state.replyPending || state.paused ? "disabled" : ""}>Retry reply</button>`
+    ? `<button class="dialog-text-button" type="button" data-action="retry-role-reply" ${state.replyPending ? "disabled" : ""}>Try again</button>`
     : "";
-  return `<div class="role-generation-status is-error" data-reply-status role="alert">${replyModeMarkup}<span>${esc(state.replyMessage)}</span>${diagnosticMarkup}${retryButton}</div>`;
+  return `<div class="reply-notice" data-reply-status role="alert">${state.failedReplyBody ? `<p class="reply-partial">${esc(state.failedReplyBody)}</p>` : ""}<p>${esc(state.replyMessage)}</p>${retryButton}</div>`;
 }
 
 function renderParticipants() {
@@ -663,68 +695,91 @@ function renderParticipants() {
     ${renderReplyStatus()}
     <div class="participants-layout">
       <aside class="participant-rail" aria-label="Participants">
-        <div class="rail-heading"><h2>Participants <span>${state.roles.length}</span></h2><button class="button button-quiet add-button" type="button" data-action="add-role" ${state.roles.length >= MAX_PARTICIPANTS ? "disabled title=\"Maximum of 16 participants\"" : state.replyPending ? "disabled" : ""}>+ Add</button></div>
+        <div class="rail-heading"><h2>Agents <span class="count-badge">${state.roles.length}</span></h2><button class="icon-button add-button" type="button" data-action="add-role" aria-label="Add agent" ${state.roles.length >= MAX_PARTICIPANTS ? "disabled title=\"Maximum of 16 participants\"" : state.replyPending ? "disabled" : ""}>${icon("plus")}</button></div>
         <ul class="role-list">${renderRoleList()}</ul>
       </aside>
       ${renderRoleEditor(role)}
     </div>
-    <div class="page-actions"><button class="button button-quiet" type="button" data-action="go-stage" data-stage="question" ${state.replyPending ? "disabled" : ""}>← Back</button><button class="button button-primary" type="button" data-action="start-debate" ${state.roles.length && state.question.trim() && !state.replyPending ? "" : "disabled"}>Start debate <span aria-hidden="true">→</span></button></div>
   </section>`;
 }
 
 function renderMessage(message) {
+  const actions = `<div class="message-actions"><button class="icon-button" data-workspace="copy-message" data-index="${state.messages.indexOf(message)}" aria-label="Copy text" title="Copy text">${icon("copy")}</button></div>`;
   if (message.kind === "user") {
     const saveStatus = message.id && state.unsavedMessageIds.has(message.id)
       ? `<span class="message-save-status" data-message-save-id="${esc(message.id)}">${state.saveFailed ? "Not saved" : "Saving…"}</span>`
       : "";
-    return `<li class="message message-user"><div class="user-bubble"><span class="message-author">You</span><p>${esc(message.body)}</p>${saveStatus}</div></li>`;
+    return `<li class="message message-user"><div class="user-bubble"><div class="user-meta"><span class="message-author">${state.readOnly ? 'Host' : 'You'}</span>${state.readOnly ? avatar({ name: 'Host' }) : avatar(workspace.profile())}</div>${workspace.renderAttachments(message.attachments)}${message.body ? `<p>${esc(message.body)}</p>` : ""}${saveStatus}${message.body ? actions : ""}</div></li>`;
   }
-  const role = roleById(message.roleId) || { name: "Participant", avatar: "•" };
-  return `<li class="message message-participant"><span class="message-avatar" aria-hidden="true">${esc(role.avatar)}</span><div class="message-copy"><div class="message-meta"><strong>${esc(role.name)}</strong><span>${esc(roleIdentityLabel(role))}</span><span class="sequence-tag">Reply ${esc(message.letter)}</span></div><p>${esc(message.body)}</p></div></li>`;
+  const role = state.roles.find(item => item.id === message.roleId) || { name: "Former agent" };
+  return `<li class="message message-participant">${avatar(role, state.roles.indexOf(role))}<div class="message-copy"><div class="message-meta"><strong>${esc(agentName(role))}</strong></div><p>${renderCitedText(message.body, message.citations)}</p>${actions}</div></li>`;
 }
 
 function renderStreamingReply() {
   if (!state.streamingReply) return "";
-  const role = roleById(state.streamingReply.roleId) || { name: "Participant", avatar: "•" };
+  const role = state.roles.find(item => item.id === state.streamingReply.roleId);
+  if (!role) return '<li class="reply-preparing" role="status">Preparing a reply…</li>';
   return `<li class="message message-participant is-streaming" data-streaming-reply>
-    <span class="message-avatar" data-streaming-avatar aria-hidden="true">${esc(role.avatar)}</span>
-    <div class="message-copy"><div class="message-meta"><strong data-streaming-name>${esc(role.name)}</strong><span data-streaming-identity>${esc(roleIdentityLabel(role))}</span></div><p data-streaming-body aria-live="off">${esc(state.streamingReply.body)}</p></div>
+    ${avatar(role, state.roles.indexOf(role))}
+    <div class="message-copy"><div class="message-meta"><strong data-streaming-name>${esc(agentName(role))}</strong><span class="sr-only" data-streaming-identity>${esc(roleIdentityLabel(role))}</span><span class="agent-activity" data-agent-activity role="status">${esc(({searching: 'Searching the web…', reading: 'Reviewing sources…', unavailable: 'Couldn’t check online'})[state.streamingReply.phase] || '')}</span></div><p data-streaming-body aria-live="off">${renderCitedText(state.streamingReply.citations || state.replyMode !== 'web_tool_text_v1' ? state.streamingReply.body : streamingText(state.streamingReply.body), state.streamingReply.citations)}</p></div>
   </li>`;
 }
 
 function renderPendingChatMessage(message) {
-  const status = state.unsavedMessageIds.has(message.id) ? (state.saveFailed ? "Not saved" : "Saving…") : "Saved · queued";
-  return `<li class="message message-user"><div class="user-bubble"><span class="message-author">You</span><p>${esc(message.body)}</p><span class="message-save-status" data-message-save-id="${esc(message.id)}">${status}</span></div></li>`;
+  const saveStatus = state.unsavedMessageIds.has(message.id)
+    ? `<span class="message-save-status" data-message-save-id="${esc(message.id)}">${state.saveFailed ? "Not saved" : "Saving…"}</span>`
+    : "";
+  return `<li class="message message-user"><div class="user-bubble"><div class="user-meta"><span class="message-author">${state.readOnly ? 'Host' : 'You'}</span>${state.readOnly ? avatar({ name: 'Host' }) : avatar(workspace.profile())}</div>${workspace.renderAttachments(message.attachments)}${message.body ? `<p>${esc(message.body)}</p>` : ""}${saveStatus}</div></li>`;
 }
 
+function matchingMentionRoles() {
+  const query = state.mentionQuery.toLocaleLowerCase();
+  return state.roles.filter(role => role.name.toLocaleLowerCase().startsWith(query));
+}
 function renderMentionMenu() {
-  return `<div class="mention-menu" id="mention-menu" role="listbox" aria-label="Mention a participant" ${state.mentionOpen ? "" : "hidden"}>${state.roles.map((role) => `<button type="button" role="option" data-action="mention-role" data-role-id="${esc(role.id)}"><span aria-hidden="true">${esc(role.avatar)}</span><span>${esc(role.name || "Unnamed participant")}</span></button>`).join("")}</div>`;
+  const roles = matchingMentionRoles();
+  return `<div class="mention-menu" id="mention-menu" role="listbox" aria-label="Mention an agent" ${state.mentionOpen ? "" : "hidden"}>${roles.map((role, index) => `<button id="mention-option-${index}" type="button" role="option" aria-selected="${index === state.mentionActiveIndex}" data-action="mention-role" data-role-id="${esc(role.id)}">${avatar(role, state.roles.indexOf(role))}<span>${esc(agentName(role))}</span></button>`).join("") || '<p class="mention-empty">No matching agents</p>'}</div>`;
+}
+function syncMentionMenu() {
+  const menu = appView.querySelector("#mention-menu");
+  if (!menu) return;
+  const fresh = document.createElement("div");
+  fresh.innerHTML = renderMentionMenu();
+  const next = fresh.firstElementChild;
+  // Keep the popup itself mounted while filtering so its position and motion stay stable.
+  const scrollTop = menu.scrollTop;
+  menu.innerHTML = next.innerHTML;
+  menu.hidden = next.hidden;
+  menu.scrollTop = scrollTop;
+  const input = appView.querySelector("[data-chat-input]");
+  input?.setAttribute("aria-expanded", String(state.mentionOpen));
+  if (state.mentionOpen && matchingMentionRoles().length) input?.setAttribute("aria-activedescendant", `mention-option-${state.mentionActiveIndex}`);
+  else input?.removeAttribute("aria-activedescendant");
+  appView.querySelector('[data-action="toggle-mentions"]')?.setAttribute("aria-expanded", String(state.mentionOpen));
+}
+function resizeComposer() {
+  const input = appView.querySelector("[data-chat-input]");
+  if (!input) return;
+  input.style.height = "0px";
+  input.style.height = `${Math.min(160, Math.max(44, input.scrollHeight))}px`;
+}
+function resizeQuestionInput() {
+  const input = appView.querySelector("[data-field='question']");
+  if (!input) return;
+  input.style.height = "0px";
+  input.style.height = `${Math.min(156, Math.max(52, input.scrollHeight))}px`;
 }
 
 function renderDebate() {
-  const summaryDisabled = summaryActionDisabled();
-  const summaryHelp = summaryWaitMessage();
-  const summaryLabel = state.summaryLoading
-    ? "Summarizing…"
-    : state.summaryText && state.summaryDirty
-      ? "Update summary"
-      : "Summary";
   return `<section class="screen debate-screen" aria-labelledby="debate-title">
-    <div class="debate-heading">
-      <h1 id="debate-title" class="question-context" title="${esc(state.question)}">${esc(state.question)}</h1>
-      <div class="debate-heading-tools">
-        <button class="button button-secondary summary-button" type="button" data-action="summary" aria-describedby="summary-availability" ${summaryDisabled ? "disabled" : ""}>${summaryLabel}</button>
-        <button class="button button-secondary pause-button" type="button" data-action="toggle-pause" aria-pressed="${state.paused}">${state.paused ? "Resume" : "Pause"}</button>
-      </div>
-    </div>
-    <p class="summary-availability" id="summary-availability" ${summaryHelp ? "" : "hidden"}>${esc(summaryHelp)}</p>
-    ${renderReplyStatus()}
-    <ol class="message-list" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions">${state.messages.map(renderMessage).join("")}${renderStreamingReply()}${state.pendingUserMessages.map(renderPendingChatMessage).join("")}</ol>
+    <ol class="message-list" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions">${state.messages.map(renderMessage).join("")}${renderStreamingReply()}${state.replyError ? `<li class="message reply-failed">${renderReplyStatus()}</li>` : ""}${state.pendingUserMessages.map(renderPendingChatMessage).join("")}${!state.messages.length && !state.streamingReply && !state.replyError ? '<li class="conversation-empty">Your agents are ready to begin.</li>' : ""}</ol>
+    ${state.readOnly ? `<div class="viewer-footer"><span>${state.access === 'legacy' ? 'Older conversation · read only' : 'View-only conversation'}</span>${state.access === 'legacy' ? '<button class="button button-primary" data-workspace="copy-legacy">Save a private copy</button>' : `<a class="button button-primary" href="${APP_PATH}">Start your own</a>`}</div>` : `<div class="composer-shell">${renderMentionMenu()}
     <form class="composer-form" data-form="chat" aria-busy="${state.replyPending}">
+      ${workspace.renderAttachments(state.draftAttachments, true)}
       <label class="sr-only" for="chat-input">Your message</label>
-      <textarea id="chat-input" data-chat-input rows="2" maxlength="2000" placeholder="Write a message…">${esc(state.composeDraft)}</textarea>
-      <div class="composer-footer"><div class="mention-control">${renderMentionMenu()}<button class="button button-quiet mention-button" type="button" data-action="toggle-mentions" aria-expanded="${state.mentionOpen}" aria-controls="mention-menu">@ <span>mention</span></button></div><button class="button button-primary send-button" type="submit">Send <span aria-hidden="true">↑</span></button></div>
-    </form>
+      <textarea id="chat-input" data-chat-input rows="3" maxlength="2000" placeholder="Add your perspective…" aria-autocomplete="list" aria-controls="mention-menu" aria-expanded="${state.mentionOpen}">${esc(state.composeDraft)}</textarea>
+      <div class="composer-footer"><div class="composer-tools"><button class="icon-button" type="button" data-attachment-action="images" aria-label="Upload images (up to 6)">${icon("plus")}</button><button class="icon-button" type="button" data-attachment-action="files" aria-label="Upload files">${icon("paperclip")}</button><div class="mention-control"><button class="icon-button mention-button" type="button" data-action="toggle-mentions" aria-label="Mention an agent" aria-expanded="${state.mentionOpen}" aria-controls="mention-menu">${icon("at")}</button></div></div><div class="composer-send"><button class="send-button" type="submit" aria-label="Send message" ${(state.composeDraft.trim() || state.draftAttachments.length) && !workspace.uploading() ? "" : "disabled"}>${icon("send")}</button></div></div>
+    </form></div>`}
   </section>`;
 }
 
@@ -737,32 +792,36 @@ function renderSummaryDialog() {
   }
   const updateLabel = state.summaryLoading
     ? "Updating…"
-    : state.summaryText && state.summaryDirty
-      ? "Update summary"
-      : state.summaryText
-        ? "Generate again"
-        : "Generate summary";
+    : state.summaryError ? "Try again" : state.summaryText ? "Update summary" : "Generate summary";
   const summaryDisabled = summaryActionDisabled();
+  const participants = state.roles.filter(role => state.messages.some(message => message.kind === "participant" && message.roleId === role.id));
   summaryDialog.innerHTML = `<div class="summary-dialog-content">
-    <header class="summary-dialog-header"><div><p class="eyebrow">Saved conversation</p><h2 id="summary-dialog-title">Summary</h2></div><button class="button button-quiet" type="button" data-action="close-summary" aria-label="Close summary">Close</button></header>
-    ${state.summaryDirty ? `<p class="summary-stale" role="status">New conversation content is available. Update this summary when ready.</p>` : ""}
-    ${state.summaryError ? `<p class="summary-error" role="alert">${esc(state.summaryError)}</p>` : ""}
+    <header class="summary-dialog-header"><h2 id="summary-dialog-title">Summary</h2><button class="icon-button" type="button" data-action="close-summary" aria-label="Close summary">${icon("close")}</button></header>
+    <div class="summary-context"><h3 title="${esc(state.question)}">${esc(state.question)}</h3><p><span>From this conversation</span><span class="summary-people" aria-label="${esc(participants.map(role => agentName(role)).join(", "))}">${participants.slice(0, 4).map(role => avatar(role)).join("")}</span></p></div>
+    ${state.summaryDirty ? `<p class="summary-stale" role="status">New replies added. Update when ready.</p>` : ""}
+    ${state.summaryError ? `<div class="summary-error" role="alert"><p>${esc(state.summaryError)}</p>${state.summaryText ? '<p>Your last summary is still here.</p>' : ""}</div>` : ""}
     ${state.summaryLoading && !state.summaryText ? `<p class="summary-loading" role="status">Generating summary…</p>` : ""}
-    ${state.summaryText ? `<div class="summary-copy">${esc(state.summaryText)}</div><p class="summary-meta">Based on ${state.summaryMessageCount} saved messages · revision ${state.summarySourceRevision}.</p>` : ""}
-    ${!state.summaryText && !state.summaryLoading && !state.summaryError ? `<p class="summary-empty">A plain-text summary will cover the main views, disagreements, open questions, and optional next steps.</p>` : ""}
-    <footer class="summary-dialog-actions"><button class="button button-primary" type="button" data-action="regenerate-summary" ${summaryDisabled ? "disabled" : ""}>${updateLabel}</button></footer>
+    ${state.summaryText ? `<div class="summary-copy">${renderSummaryCopy(state.summaryText)}</div>` : ""}
+    ${!state.summaryText && !state.summaryLoading && !state.summaryError ? `<p class="summary-empty">See the key trade-off, what the evidence supports, and a useful next step.</p>` : ""}
+    <footer class="summary-dialog-actions"><button class="dialog-text-button" type="button" data-action="copy-summary" ${state.summaryText ? "" : "disabled"}>${icon("copy")}<span>Copy</span></button>${state.summaryText && !state.readOnly ? `<div class="summary-feedback" data-summary-feedback>${state.summaryFeedback !== null ? '<span>Feedback saved. Thank you.</span>' : '<span>Useful?</span><button type="button" data-action="summary-feedback" data-helpful="true">Yes</button><button type="button" data-action="summary-feedback" data-helpful="false">Not yet</button>'}</div>` : ''}<button class="dialog-primary" type="button" data-action="regenerate-summary" ${summaryDisabled || state.readOnly ? "disabled" : ""}>${state.readOnly ? 'View only' : updateLabel}</button></footer>
   </div>`;
   if (!summaryDialog.open) summaryDialog.showModal();
 }
 
+async function copySummary(button) {
+  if (!state.summaryText) return;
+  try {
+    await navigator.clipboard.writeText(state.summaryText);
+    if (button.isConnected) button.innerHTML = `${icon("check")}<span>Copied</span>`;
+  } catch { workspace.notify("Select the summary text to copy it."); }
+}
+
 function summaryWaitMessage() {
-  if (!summaryDialog) return "Summary panel is unavailable in this page version. Refresh the preview to continue.";
+  if (!summaryDialog) return "Summary isn’t available yet. Try again.";
   if (!state.sessionId) return "Save this conversation before creating a summary.";
+  if (state.readOnly && !state.summaryText) return "The host hasn’t saved a summary yet.";
   if (state.savedParticipantReplyCount < 3) {
-    return `Summary unlocks after 3 saved participant replies (${state.savedParticipantReplyCount}/3).`;
-  }
-  if (state.replyPending || state.pendingUserMessages.length || state.discussionStartPending) {
-    return "Wait for the current reply and queued messages to finish saving.";
+    return `Available after 3 AI replies.`;
   }
   return "";
 }
@@ -771,9 +830,7 @@ function summaryActionDisabled() {
   return !summaryDialog
     || !state.sessionId
     || state.savedParticipantReplyCount < 3
-    || state.replyPending
-    || state.pendingUserMessages.length > 0
-    || state.discussionStartPending
+    || (state.readOnly && !state.summaryText)
     || state.summaryLoading;
 }
 
@@ -790,6 +847,8 @@ function closeSummaryDialog() {
 }
 
 async function requestSummary(regenerate = false) {
+  if (state.readOnly) { state.summaryOpen = Boolean(state.summaryText); render(); return Boolean(state.summaryText); }
+  if (!await workspace.ensureSignedIn()) return false;
   if (summaryActionDisabled()) return false;
   if (state.summaryText && !state.summaryDirty && !regenerate) {
     state.summaryOpen = true;
@@ -828,11 +887,11 @@ async function requestSummary(regenerate = false) {
     state.summaryText = result.summary;
     state.summarySourceRevision = result.sourceRevision;
     state.summaryMessageCount = result.summarizedMessageCount;
-    state.summaryDirty = state.summaryContentVersion !== contentVersion;
+    state.summaryDirty = state.summaryContentVersion !== contentVersion || Boolean(result.isStale);
     return true;
   } catch (error) {
     if (summaryRequestIsCurrent(requestId, sessionId)) {
-      state.summaryError = error instanceof Error ? error.message : "Could not create the summary. Please retry.";
+      state.summaryError = state.summaryText ? "Couldn’t update the summary." : "Couldn’t create the summary. Try again.";
     }
     return false;
   } finally {
@@ -850,11 +909,12 @@ function isMessageListNearBottom(list) {
 }
 
 function render() {
+  workspace.renderSidebar();
   document.body.dataset.debateStage = state.stage;
   if (state.restoreFailed) {
     stageNavigation.hidden = true;
     stageNavigation.innerHTML = "";
-    appView.innerHTML = `<section class="screen restore-error" aria-labelledby="restore-error-title"><p class="eyebrow">Saved session</p><h1 id="restore-error-title">This session could not be opened</h1><p class="screen-intro" role="alert">${esc(state.restoreMessage)}</p><div class="page-actions"><button class="button button-secondary" type="button" data-action="retry-restore">Try again</button><a class="button button-primary" href="${esc(BASE_PATH)}">Start a new question</a></div></section>`;
+    appView.innerHTML = `<section class="screen restore-error" aria-labelledby="restore-error-title"><div class="restore-error-content"><h1 id="restore-error-title">This conversation won’t open.</h1><p class="restore-error-description" role="alert">${esc(state.restoreMessage)}</p><div class="page-actions"><button class="button button-primary" type="button" data-action="retry-restore">Try again</button></div></div></section>`;
     renderSummaryDialog();
     return;
   }
@@ -864,6 +924,13 @@ function render() {
   const previousMessageList = appView.querySelector(".message-list");
   const previousMessageScroll = previousMessageList?.scrollTop ?? 0;
   const shouldFollowLatest = !previousMessageList || isMessageListNearBottom(previousMessageList);
+  const previousRoleList = appView.querySelector(".role-list");
+  const previousRoleScroll = {
+    top: previousRoleList?.scrollTop ?? 0,
+    left: previousRoleList?.scrollLeft ?? 0,
+    selectedId: previousRoleList?.querySelector(".is-selected")?.dataset.roleId,
+    count: previousRoleList?.children.length,
+  };
   const previousChatInput = appView.querySelector("[data-chat-input]");
   const preserveChatInputFocus = document.activeElement === previousChatInput;
   const previousSelection = preserveChatInputFocus
@@ -875,7 +942,26 @@ function render() {
     : null;
   stageNavigation.hidden = false;
   stageNavigation.innerHTML = renderStepper();
-  appView.innerHTML = `${renderSaveStatus()}${screen}`;
+  appView.innerHTML = `<div class="workspace-layout${state.stage === "debate" ? "" : " is-setup"}"><div class="main-column">${renderSaveStatus()}${screen}</div>${state.stage === "debate" ? renderDock() : ""}</div>`;
+  const roleList = appView.querySelector(".role-list");
+  if (roleList) {
+    roleList.scrollTop = previousRoleScroll.top;
+    roleList.scrollLeft = previousRoleScroll.left;
+    if (previousRoleScroll.selectedId !== state.selectedRoleId || previousRoleScroll.count !== state.roles.length) {
+      const selected = roleList.querySelector(".is-selected");
+      if (selected) {
+        const listBounds = roleList.getBoundingClientRect();
+        const selectedBounds = selected.getBoundingClientRect();
+        if (selectedBounds.top < listBounds.top) roleList.scrollTop -= listBounds.top - selectedBounds.top;
+        else if (selectedBounds.bottom > listBounds.bottom) roleList.scrollTop += selectedBounds.bottom - listBounds.bottom;
+        if (selectedBounds.left < listBounds.left) roleList.scrollLeft -= listBounds.left - selectedBounds.left;
+        else if (selectedBounds.right > listBounds.right) roleList.scrollLeft += selectedBounds.right - listBounds.right;
+      }
+    }
+  }
+  resizeComposer();
+  resizeQuestionInput();
+  for (const button of appView.querySelectorAll("button[aria-label]")) button.title = button.getAttribute("aria-label");
   const messageList = appView.querySelector(".message-list");
   if (messageList) {
     messageList.scrollTop = shouldFollowLatest
@@ -895,6 +981,8 @@ function render() {
   }
   renderSummaryDialog();
   const titles = { question: "Question", participants: "Participants", debate: "Debate" };
+  const skip = document.querySelector('.skip-link');
+  if (skip) skip.href = `${location.pathname}${location.search}#app-view`;
   document.title = `${titles[state.stage]} · Debate Agora`;
 }
 
@@ -907,8 +995,8 @@ function syncRoleGenerationControls() {
   if (questionInput) questionInput.disabled = state.roleGenerationPhase === "saving";
   const submit = form.querySelector("button[type='submit']");
   if (submit) {
-    const buttonLabel = state.roleGenerationPending ? "Building the group" : "Build the group";
-    submit.disabled = state.roleGenerationPending || !state.question.trim();
+    const buttonLabel = state.roleGenerationPending ? "Finding perspectives" : "Start conversation";
+    submit.disabled = state.roleGenerationPending || !state.question.trim() || workspace.uploading();
     submit.setAttribute("aria-label", buttonLabel);
   }
   const message = state.roleGenerationPending || state.roleGenerationError ? state.roleGenerationMessage : "";
@@ -929,9 +1017,11 @@ function syncRoleGenerationControls() {
 }
 
 function stageUrl(stage) {
-  const path = stage === "question" ? BASE_PATH : `${BASE_PATH}${stage}`;
+  const path = stage === "question" ? APP_PATH : `${APP_PATH}/${stage}`;
   const query = new URLSearchParams();
   if (state.sessionId) query.set("session", state.sessionId);
+  const share = new URLSearchParams(location.search).get("share");
+  if (share) query.set("share", share);
   const search = query.toString();
   return search ? `${path}?${search}` : path;
 }
@@ -973,17 +1063,7 @@ async function setStage(stage, updateHistory = true, roleGenerationRequestId = n
 }
 
 function roleForChatMessage(message) {
-  const mentionIndex = message.indexOf("@");
-  if (mentionIndex < 0) return null;
-  const mention = message.slice(mentionIndex + 1).trimStart();
-  const rolesByNameLength = [...state.roles].sort((left, right) => right.name.length - left.name.length);
-  return rolesByNameLength.find((role) => {
-    const name = role.name.trim();
-    const candidate = mention.slice(0, name.length);
-    const boundary = mention[name.length];
-    return candidate.toLocaleLowerCase() === name.toLocaleLowerCase()
-      && (boundary === undefined || /[\s,.!?;:]/u.test(boundary));
-  }) || null;
+  return mentionedRole(message, state.roles);
 }
 
 function updateComposeDraft(value) {
@@ -995,6 +1075,7 @@ function updateComposeDraft(value) {
     appView.querySelector("[data-reply-status]")?.remove();
   }
   state.composeDraft = value;
+  rememberComposeDraft();
 }
 
 function roleReplyIsCurrent(requestId, sessionId, roleEditVersion) {
@@ -1012,18 +1093,19 @@ async function toggleDiscussionPause() {
     state.restartDiscussionAfterTask = false;
     render();
     if (!await saveSessionNow()) {
-      showReplyError(`Discussion paused, but the pause state could not be saved. ${state.saveStatus || "Resolve the save issue before resuming."}`);
+      workspace.notify("Paused in this tab. Couldn’t save the change yet.");
     }
     return;
   }
 
+  if (!await workspace.ensureReplyAvailable()) return;
   const shouldContinue = state.pendingUserMessages.length > 0 || !state.replyError;
+  state.roundComplete = false;
   state.paused = false;
   render();
   if (!await saveSessionNow()) {
-    state.paused = true;
     state.restartDiscussionAfterTask = false;
-    showReplyError(`The discussion could not resume because the session was not saved. ${state.saveStatus || "Resolve the save issue and try again."}`);
+    showReplyError("Couldn’t save the conversation. Try again.", { roleId: null, initial: false });
     return;
   }
   if (!shouldContinue) return;
@@ -1034,22 +1116,13 @@ async function toggleDiscussionPause() {
 }
 
 function roleReplyErrorMessage(error) {
-  const detail = error instanceof Error && error.message ? ` ${error.message}` : " Please try again.";
-  if (error?.message?.includes("still returned an invalid reply control format after one repair")) {
-    return "The model could not format its reply after one repair. No participant reply was added; your existing discussion is preserved. Retry the reply or send a message.";
-  }
-  if (error?.message?.includes("The course model returned an incomplete reply control marker.")) {
-    return "This preview is still running the earlier reply-stream code. Refresh or restart the preview to load the control-marker fix, then retry the reply.";
-  }
-  if (error?.message === "The server returned an invalid reply control marker.") {
-    return "This preview server did not return the reply status required by this version. Refresh or restart the preview, then retry the reply.";
-  }
-  if (error?.status === 503) return `The participant reply service is unavailable.${detail}`;
-  if (error?.status === 404 && error.message?.includes("Unknown or disabled API route:")) {
-    return `The participant reply endpoint is not available in the running preview version. Refresh or restart the preview after syncing the latest app code.${detail}`;
-  }
-  if (error?.status === 404) return `The saved session or participant could not be found.${detail}`;
-  return `Could not generate a participant reply.${detail}`;
+  if (error?.status === 401) return "Log in to continue the conversation.";
+  if (error?.status === 409 && /another tab/i.test(error.message || '')) return "This debate is running in another tab. Continue there, or try again when its current reply finishes.";
+  if (error?.status === 402) return "You’re out of AI replies. Open Usage to invite a friend or request more.";
+  if (error?.status === 404) return "This conversation or agent is no longer available.";
+  if (state.failedReplyBody) return "This reply stopped early.";
+  const role = state.roles.find(item => item.id === state.streamingReply?.roleId);
+  return role ? `${role.name.replace(/\.ai$/i, "")} couldn’t reply.` : "Couldn’t get a reply.";
 }
 
 function showReplyError(message, retryTarget = null, diagnostics = null) {
@@ -1061,6 +1134,15 @@ function showReplyError(message, retryTarget = null, diagnostics = null) {
 }
 
 async function requestRoleReply(roleId, initial = false, clearDraft = false) {
+  if (state.readOnly) return false;
+  if (state.replyPending) return false;
+  if (!await workspace.ensureReplyAvailable()) {
+    if (state.sessionId && !state.readOnly && workspace.isSignedIn()) {
+      state.paused = true; state.discussionLoopVersion += 1;
+      state.restartDiscussionAfterTask = false; render(); scheduleSessionSave();
+    }
+    return false;
+  }
   if (state.replyPending) return false;
   if (state.paused) {
     showReplyError("Resume the conversation before requesting a participant reply.", { roleId, initial });
@@ -1072,12 +1154,12 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
     return false;
   }
   if (state.messages.length >= MAX_CHAT_MESSAGES) {
-    showReplyError(`This session has reached its ${MAX_CHAT_MESSAGES}-message save limit. The participant reply was not requested.`);
+    showReplyError("This conversation is full. Start a new debate to keep going.");
     return false;
   }
   const sessionId = state.sessionId;
   if (!sessionId) {
-    showReplyError("This conversation has not been saved yet, so a participant reply cannot be requested.");
+    showReplyError("Couldn’t save this conversation. Try again.");
     return false;
   }
 
@@ -1091,14 +1173,17 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
   state.replyMessage = "";
   state.replyMode = "";
   state.replyDiagnostics = null;
-  state.streamingReply = null;
+  state.failedReplyBody = "";
+  state.replyBlockedBySave = false;
+  state.streamingReply = { roleId: roleId || "", body: "" };
   state.replyRetryTarget = null;
   render();
 
   try {
     if (!await saveSessionNow()) {
       if (roleReplyIsCurrent(requestId, sessionId, roleEditVersion)) {
-        showReplyError(`The reply was not requested because the conversation could not be saved. ${state.saveStatus || "Resolve the save issue and retry."}`, { roleId, initial, clearDraft });
+        state.replyBlockedBySave = true;
+        showReplyError("Couldn’t save the conversation. Try again.", { roleId, initial, clearDraft });
       }
       return false;
     }
@@ -1115,10 +1200,14 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
     let streamedSpeakerId = "";
     let streamedReplyMode = "";
     let streamComplete = false;
+    let roundComplete = false;
+    let remaining = null;
     let waitingForUser = null;
+    let committedMessage = null;
+    state.replyAbort = new AbortController();
     await requestEventStream(
       roleReplyStreamApi(sessionId),
-      jsonOptions("POST", roleId ? { participantId: roleId } : {}, ROLE_REPLY_TIMEOUT_MS),
+      { ...jsonOptions("POST", roleId ? { participantId: roleId } : {}, ROLE_REPLY_TIMEOUT_MS), signal: state.replyAbort.signal },
       async (event) => {
         if (!roleReplyIsCurrent(requestId, sessionId, roleEditVersion)) {
           throw new Error("The participant reply is no longer current.");
@@ -1139,16 +1228,31 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
         }
         if (event.type === "delta") {
           if (typeof event.text !== "string" || !event.text) return;
-          if (state.streamingReply.body.length + event.text.length > MAX_CHAT_MESSAGE_LENGTH) {
+          if (state.streamingReply.body.length + event.text.length > (streamedReplyMode === "web_tool_text_v1" ? 8000 : MAX_CHAT_MESSAGE_LENGTH)) {
             throw new Error("The participant reply exceeded the message length limit.");
           }
           state.streamingReply.body += event.text;
           const list = appView.querySelector(".message-list");
           const nearBottom = isMessageListNearBottom(list);
           const body = appView.querySelector("[data-streaming-body]");
-          if (body) body.textContent += event.text;
+          if (body) body.textContent = streamedReplyMode === "web_tool_text_v1" ? streamingText(state.streamingReply.body) : state.streamingReply.body;
           if (list && nearBottom) list.scrollTop = list.scrollHeight;
           await new Promise((resolve) => window.setTimeout(resolve, STREAM_CHUNK_DELAY_MS));
+          return;
+        }
+        if (event.type === "activity") {
+          if (event.speakerId !== streamedSpeakerId || !["searching", "reading", "answering", "unavailable"].includes(event.phase)) throw new Error("Invalid agent activity.");
+          state.streamingReply.phase = event.phase;
+          const label = appView.querySelector('[data-agent-activity]');
+          if (label) label.textContent = ({searching: 'Searching the web…', reading: 'Reviewing sources…', unavailable: 'Couldn’t check online'})[event.phase] || '';
+          return;
+        }
+        if (event.type === "citations") {
+          if (event.speakerId !== streamedSpeakerId || typeof event.text !== "string" || event.text.length > MAX_CHAT_MESSAGE_LENGTH) throw new Error("Invalid reply sources.");
+          state.streamingReply.citations = trustedCitations(event.citations);
+          state.streamingReply.body = event.text;
+          const body = appView.querySelector('[data-streaming-body]');
+          if (body) body.innerHTML = renderCitedText(event.text, state.streamingReply.citations);
           return;
         }
         if (event.type === "done") {
@@ -1161,6 +1265,13 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
             throw new Error("The server returned an invalid reply control marker.");
           }
           waitingForUser = AUTO_CLARIFICATION_WAIT_ENABLED ? event.waitingForUser : false;
+          roundComplete = event.roundComplete === true;
+          remaining = Number.isSafeInteger(event.remaining) ? event.remaining : null;
+          if (event.message?.kind === "participant" && event.message.roleId === streamedSpeakerId
+            && typeof event.message.id === "string" && /^reply-[a-f0-9]{32}$/.test(event.message.id)
+            && typeof event.message.body === "string" && event.message.body.trim()) {
+            committedMessage = { ...event.message, ...(event.message.citations ? { citations: trustedCitations(event.message.citations) } : {}) };
+          }
           streamComplete = true;
           return;
         }
@@ -1178,13 +1289,20 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
     }
 
     const roleIndex = state.roles.findIndex((candidate) => candidate.id === streamedSpeakerId);
-    const message = {
+    const message = committedMessage || {
       kind: "participant",
       roleId: streamedSpeakerId,
       letter: String.fromCharCode(65 + Math.max(0, roleIndex)),
       body: state.streamingReply.body.trim(),
     };
     if (waitingForUser) message.waitingForUser = true;
+    if (roundComplete) message.roundEnd = true;
+    state.roundComplete = roundComplete && state.pendingUserMessages.length === 0;
+    if (state.roundComplete || remaining === 0) {
+      state.paused = true;
+      state.restartDiscussionAfterTask = false;
+    }
+    if (state.streamingReply.citations?.length) message.citations = state.streamingReply.citations;
     state.messages.push(message);
     markSummaryDirty();
     if (clearDraft && state.composeDraft === draftAtRequest) state.composeDraft = "";
@@ -1196,7 +1314,8 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
     if (!await saveSessionNow()) {
       if (roleReplyIsCurrent(requestId, sessionId, roleEditVersion)) {
         state.waitingForUser = waitingForUser;
-        showReplyError(`The reply was generated, but your local conversation could not be saved. ${state.saveStatus || "Your local messages remain visible."}`);
+        state.replyBlockedBySave = true;
+        showReplyError("This reply is visible here, but hasn’t been saved yet.");
       }
       return false;
     }
@@ -1210,14 +1329,58 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
     return true;
   } catch (error) {
     if (!roleReplyIsCurrent(requestId, sessionId, roleEditVersion)) return false;
-    showReplyError(roleReplyErrorMessage(error), { roleId, initial, clearDraft }, error?.diagnostics);
+    // A connection can end after the server committed the reply but before `done` arrived.
+    // Recover that receipt before offering a retry that would create another reply.
+    try {
+      const result = await requestJson(sessionApi(`/${encodeURIComponent(sessionId)}`));
+      if (!roleReplyIsCurrent(requestId, sessionId, roleEditVersion)) return false;
+      const added = result.session.messages.slice(state.messages.length);
+      if (added.length && added.every(message => message.kind === "participant" && /^reply-[a-f0-9]{32}$/.test(message.id || ""))) {
+        state.messages.push(...added);
+        state.sessionRevisions.set(sessionId, result.session.revision);
+        state.savedParticipantReplyCount = countSavedParticipantReplies(result.session.messages);
+        state.roundComplete = added.at(-1).roundEnd === true && !state.pendingUserMessages.length;
+        state.paused = state.paused || result.session.paused || state.roundComplete;
+        state.streamingReply = null;
+        state.replyError = false; state.replyMessage = ""; state.replyDiagnostics = null; state.replyRetryTarget = null;
+        state.waitingForUser = false;
+        markSummaryDirty(); render();
+        return true;
+      }
+    } catch { /* Keep the normal retry state when recovery is also offline. */ }
+    state.discussionLoopVersion += 1;
+    state.restartDiscussionAfterTask = false;
+    state.failedReplyBody = state.streamingReply?.body || "";
+    const failedRoleId = state.streamingReply?.roleId || roleId;
+    const message = roleReplyErrorMessage(error);
+    state.streamingReply = null;
+    showReplyError(message, { roleId: failedRoleId || null, initial, clearDraft }, error?.diagnostics);
+    scheduleSessionSave();
+    if (error?.status === 401 || error?.status === 402) {
+      state.paused = true;
+      state.replyError = false;
+      state.replyMessage = "";
+      render();
+      scheduleSessionSave();
+      await workspace.refreshUsage();
+      await workspace.ensureReplyAvailable();
+    }
     return false;
   } finally {
     if (state.activeReplyRequestId === requestId) {
       state.activeReplyRequestId = null;
       state.replyPending = false;
+      state.replyAbort = null;
       state.streamingReply = null;
+      if (state.pendingConversationStyle) {
+        const style = state.pendingConversationStyle;
+        state.pendingConversationStyle = "";
+        state.roles.forEach(role => { role.prompt = withConversationStyle(role.prompt, style); });
+        state.roleEditVersion += 1;
+        scheduleSessionSave();
+      }
       if (!state.restoreFailed) render();
+      void workspace.refreshUsage();
     }
   }
 }
@@ -1225,6 +1388,8 @@ async function requestRoleReply(roleId, initial = false, clearDraft = false) {
 function discussionLoopIsCurrent(runId) {
   return state.discussionLoopVersion === runId
     && !state.paused
+    && !state.readOnly
+    && !state.replyError
     && !state.restoreFailed
     && state.debateStarted
     && state.stage === "debate";
@@ -1237,7 +1402,7 @@ async function runDiscussionLoop(runId, firstReply = null) {
       let queuedMessage = state.pendingUserMessages.shift();
       if (!queuedMessage) {
         if (state.waitingForUser) return;
-        await new Promise((resolve) => window.setTimeout(resolve, DISCUSSION_TURN_DELAY_MS));
+        await new Promise((resolve) => window.setTimeout(resolve, discussionTurnDelay(state.messages.at(-1)?.body)));
         if (!discussionLoopIsCurrent(runId)) return;
         nextReply = state.priorityReply;
         state.priorityReply = null;
@@ -1247,6 +1412,7 @@ async function runDiscussionLoop(runId, firstReply = null) {
         state.waitingForUser = false;
         if (!state.messages.some((message) => message.id === queuedMessage.id)) {
           const userMessage = { kind: "user", id: queuedMessage.id, body: queuedMessage.body };
+          if (queuedMessage.attachments?.length) userMessage.attachments = queuedMessage.attachments;
           if (queuedMessage.participantId) userMessage.participantId = queuedMessage.participantId;
           state.messages.push(userMessage);
         }
@@ -1259,9 +1425,19 @@ async function runDiscussionLoop(runId, firstReply = null) {
       nextReply = { roleId: null, initial: false };
     }
 
+    // Finish editing safely before the next turn, without changing the user's pause choice.
+    await workspace.waitForAgentEditor();
+    if (!discussionLoopIsCurrent(runId)) return;
     const reply = nextReply;
     nextReply = null;
     if (!await requestRoleReply(reply.roleId, reply.initial, reply.clearDraft)) return;
+    if (state.roundComplete) {
+      // Closing replies and the pause are already saved before generating the final outcome.
+      if (state.autoSummaryTask) await state.autoSummaryTask;
+      if (state.discussionLoopVersion === runId && state.roundComplete) await requestSummary(true);
+      return;
+    }
+    state.autoSummaryTask = maybeSaveCheckpoint();
   }
 }
 
@@ -1273,7 +1449,7 @@ function ensureDiscussionLoop(firstReply = null, resumeAfterExisting = false) {
     if (resumeAfterExisting) state.restartDiscussionAfterTask = true;
     return state.discussionLoopTask;
   }
-  if (state.paused || state.restoreFailed || !state.debateStarted || state.stage !== "debate") return null;
+  if (state.paused || state.replyError || state.restoreFailed || !state.debateStarted || state.stage !== "debate") return null;
 
   const runId = ++state.discussionLoopVersion;
   const openingReply = state.priorityReply;
@@ -1282,7 +1458,7 @@ function ensureDiscussionLoop(firstReply = null, resumeAfterExisting = false) {
     .then(() => runDiscussionLoop(runId, openingReply))
     .catch((error) => {
       if (discussionLoopIsCurrent(runId)) {
-        showReplyError(`The discussion stopped unexpectedly. ${error instanceof Error ? error.message : "Please retry when ready."}`);
+        showReplyError("The conversation stopped. Try again.", { roleId: null, initial: false });
       }
     })
     .finally(() => {
@@ -1312,7 +1488,7 @@ function nextReplyForSavedConversation() {
       roleId: role?.id || null,
       initial: false,
       clearDraft: true,
-      invalidMention: latestMessage.body.includes("@") && !role,
+      invalidMention: /(?:^|\s)@/u.test(latestMessage.body) && !role,
     };
   }
   if (!state.messages.some((message) => message.kind === "participant")) {
@@ -1322,12 +1498,33 @@ function nextReplyForSavedConversation() {
 }
 
 async function startDebate() {
+  if (state.readOnly) return false;
+  if (state.replyPending || state.discussionLoopTask || state.discussionStartPending) return false;
+  if (!await workspace.ensureReplyAvailable()) {
+    if (state.sessionId && !state.readOnly && workspace.isSignedIn()) {
+      state.paused = true; state.discussionLoopVersion += 1;
+      state.restartDiscussionAfterTask = false; render(); scheduleSessionSave();
+    }
+    return false;
+  }
   if (state.replyPending || state.discussionLoopTask || state.discussionStartPending) return false;
   if (!state.question.trim() || !state.roles.length) {
     showReplyError("Add a question and at least one participant before starting the conversation.");
     return false;
   }
   state.discussionStartPending = true;
+  state.paused = false;
+  state.waitingForUser = false;
+  state.replyError = false;
+  state.replyMessage = "";
+  state.failedReplyBody = "";
+  state.replyBlockedBySave = false;
+  if (!state.messages.length && state.draftAttachments.length) {
+    state.messages.push({ kind: "user", id: newChatMessageId(), body: state.question, attachments: state.draftAttachments });
+    state.draftAttachments = [];
+    rememberComposeDraft();
+    if (!await saveSessionNow()) { state.discussionStartPending = false; return false; }
+  }
   state.debateStarted = true;
   if (state.stage !== "debate") {
     state.stage = "debate";
@@ -1345,35 +1542,54 @@ async function startDebate() {
 }
 
 async function submitChatMessage() {
+  if (state.readOnly) return false;
   if (state.stage !== "debate") return false;
+  if (!await workspace.ensureReplyAvailable()) {
+    if (state.sessionId && !state.readOnly && workspace.isSignedIn()) {
+      state.paused = true; state.discussionLoopVersion += 1;
+      state.restartDiscussionAfterTask = false; render(); scheduleSessionSave();
+    }
+    return false;
+  }
   const message = state.composeDraft.trim();
-  if (!message) return false;
+  if (workspace.uploading()) { workspace.notify("Wait for your attachments to finish uploading."); return false; }
+  const attachments = state.draftAttachments.map(item => ({ ...item }));
+  if (!message && !attachments.length) return false;
   const role = roleForChatMessage(message);
-  if (message.includes("@") && !role) {
-    showReplyError("The @mention does not match a participant. Edit the message or choose a participant and retry.");
+  if (/(?:^|\s)@/u.test(message) && !role) {
+    workspace.notify("Choose an agent from the @ menu, or remove the mention.");
     return false;
   }
   const latestMessage = state.messages.at(-1);
   const retryingUnansweredMessage = !state.replyPending
     && state.pendingUserMessages.length === 0
     && latestMessage?.kind === "user"
-    && latestMessage.body === message;
+    && latestMessage.body === message
+    && attachmentIds(latestMessage.attachments) === attachmentIds(attachments);
   const messagesNeeded = (state.replyPending ? 1 : 0)
     + state.pendingUserMessages.length * 2
     + (retryingUnansweredMessage ? 1 : 2);
   if (state.messages.length + messagesNeeded > MAX_CHAT_MESSAGES) {
-    showReplyError(`This session has reached its ${MAX_CHAT_MESSAGES}-message save limit. Your message was not added.`);
+    showReplyError("This conversation is full. Start a new debate to keep going.");
     return false;
   }
   state.composeDraft = "";
+  state.draftAttachments = [];
+  state.roundComplete = false;
+  rememberComposeDraft();
   state.mentionOpen = false;
   state.replyMessage = "";
   state.replyError = false;
   state.replyDiagnostics = null;
   state.replyRetryTarget = null;
+  state.failedReplyBody = "";
+  state.replyBlockedBySave = false;
+  state.paused = false;
+  state.waitingForUser = false;
 
   const messageId = retryingUnansweredMessage ? latestMessage.id || newChatMessageId() : newChatMessageId();
   const pendingMessage = { id: messageId, body: message, participantId: role?.id || null };
+  if (attachments.length) pendingMessage.attachments = attachments;
   if (retryingUnansweredMessage) {
     if (!latestMessage.id) latestMessage.id = messageId;
     if (role?.id) latestMessage.participantId = role.id;
@@ -1389,26 +1605,45 @@ async function submitChatMessage() {
   }
   render();
   if (!await saveSessionNow()) return false;
-  if (!state.paused) void ensureDiscussionLoop();
+  void ensureDiscussionLoop(null, true);
   return true;
 }
 
 function retryRoleReply() {
-  if (!state.replyRetryTarget || state.replyPending || state.paused) return false;
+  if (!state.replyRetryTarget || state.replyPending) return false;
   const { roleId, initial, clearDraft = false } = state.replyRetryTarget;
-  void ensureDiscussionLoop({ roleId, initial, clearDraft });
+  state.paused = false;
+  state.waitingForUser = false;
+  state.replyError = false;
+  void ensureDiscussionLoop({ roleId, initial, clearDraft }, true);
+  return true;
+}
+
+async function retrySavingConversation() {
+  if (!await saveSessionNow()) return false;
+  const blockedReply = state.replyBlockedBySave ? state.replyRetryTarget : null;
+  if (state.replyBlockedBySave) {
+    state.replyBlockedBySave = false;
+    state.replyError = false;
+    state.replyMessage = "";
+    state.replyRetryTarget = null;
+    render();
+  }
+  if (state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError) {
+    void ensureDiscussionLoop(blockedReply, true);
+  }
   return true;
 }
 
 function updateRoleSummary(role) {
   for (const node of appView.querySelectorAll("[data-role-name]")) {
-    if (node.dataset.roleName === role.id) node.textContent = role.name || "Unnamed participant";
+    if (node.dataset.roleName === role.id) node.textContent = agentName(role);
   }
   for (const node of appView.querySelectorAll("[data-role-identity]")) {
     if (node.dataset.roleIdentity === role.id) node.textContent = roleIdentityLabel(role);
   }
   for (const node of appView.querySelectorAll("[data-role-avatar]")) {
-    if (node.dataset.roleAvatar === role.id) node.textContent = role.avatar;
+    if (node.dataset.roleAvatar === role.id) { node.textContent = initials(role.name); node.style.cssText = avatarStyle(role, state.roles.indexOf(role)); }
   }
   const selectedName = appView.querySelector("[data-selected-role-name]");
   if (selectedName && state.selectedRoleId === role.id) selectedName.textContent = role.name || "Unnamed participant";
@@ -1431,6 +1666,7 @@ function handleInput(event) {
     }
     state.question = target.value;
     syncRoleGenerationControls();
+    resizeQuestionInput();
     scheduleSessionSave();
     return;
   }
@@ -1446,13 +1682,48 @@ function handleInput(event) {
   }
   if (target.matches("[data-chat-input]")) {
     updateComposeDraft(target.value);
+    const send = appView.querySelector(".send-button");
+    if (send) send.disabled = (!target.value.trim() && !state.draftAttachments.length) || workspace.uploading();
+    resizeComposer();
+    const mention = mentionAtCaret(target.value, target.selectionStart);
+    if (state.mentionQuery !== mention?.query) state.mentionActiveIndex = 0;
+    state.mentionOpen = Boolean(mention);
+    state.mentionQuery = mention?.query || "";
+    state.mentionRange = mention?.range || null;
+    syncMentionMenu();
     scheduleSessionSave();
   }
 }
 
 function handleChange(event) {
-  if (state.replyPending) return;
   const target = event.target;
+  if (state.replyPending && !target.matches("[data-conversation-style]")) return;
+  if (target.matches("[data-avatar-color-choice]")) {
+    const role = currentRole();
+    if (!role || !isAvatarColor(target.value)) return;
+    role.avatarColor = target.value;
+    state.roleEditVersion += 1;
+    updateRoleSummary(role);
+    scheduleSessionSave(true);
+    return;
+  }
+  if (target.matches("[data-conversation-style]")) {
+    const style = target.value;
+    if (!Object.hasOwn(CONVERSATION_STYLES, style)) return;
+    const prompts = state.roles.map(role => withConversationStyle(role.prompt, style));
+    if (prompts.some(prompt => prompt.length > 1000)) { workspace.notify("Shorten agent instructions before changing the conversation style."); render(); return; }
+    if (state.replyPending) {
+      state.pendingConversationStyle = style;
+      workspace.notify("This style will apply to the next reply.");
+      return;
+    }
+    state.pendingConversationStyle = "";
+    state.roles.forEach((role, index) => { role.prompt = prompts[index]; });
+    state.roleEditVersion += 1;
+    scheduleSessionSave(true);
+    render();
+    return;
+  }
   if (!target.matches("[data-role-field]")) return;
   const role = currentRole();
   if (!role) return;
@@ -1470,6 +1741,7 @@ function addRole() {
   state.roles.push({
     id,
     avatar: "💡",
+    avatarColor: randomAvatarColor(state.roles.map(role => role.avatarColor)),
     name: "New participant",
     identity: "",
     prompt: "Bring a distinct perspective and respond to specific points.",
@@ -1498,14 +1770,20 @@ function removeSelectedRole() {
 function insertMention(roleId) {
   const role = roleById(roleId);
   if (!role) return;
-  const spacer = state.composeDraft && !/\s$/.test(state.composeDraft) ? " " : "";
-  updateComposeDraft(`${state.composeDraft}${spacer}@${role.name || "participant"} `);
+  const inserted = insertRoleMention(state.composeDraft, state.mentionRange, role.name || "Agent");
+  updateComposeDraft(inserted.text);
+  state.mentionQuery = "";
+  state.mentionRange = null;
   state.mentionOpen = false;
-  render();
-  scheduleSessionSave();
   const input = appView.querySelector("[data-chat-input]");
+  if (input) input.value = state.composeDraft;
+  syncMentionMenu();
+  resizeComposer();
+  const send = appView.querySelector(".send-button");
+  if (send) send.disabled = workspace.uploading();
+  scheduleSessionSave();
   input?.focus();
-  if (input) input.setSelectionRange(input.value.length, input.value.length);
+  if (input) input.setSelectionRange(inserted.caret, inserted.caret);
 }
 
 async function copyReplyDiagnostic() {
@@ -1537,23 +1815,47 @@ async function copyReplyDiagnostic() {
   }
 }
 
-function handleClick(event) {
-  if (event.target === summaryDialog && state.summaryOpen) {
+async function handleClick(event) {
+  if (summaryDialog && state.summaryOpen && isDialogBackdropClick(event, summaryDialog)) {
     closeSummaryDialog();
     return;
   }
   const button = event.target.closest("button[data-action]");
-  if (!button || (!appView.contains(button) && !summaryDialog?.contains(button))) return;
+  if (!button || button.disabled || (!appView.contains(button) && !summaryDialog?.contains(button) && !stageNavigation.contains(button))) return;
   const action = button.dataset.action;
 
-  if (action === "summary") {
+  if (action === "customize-first") {
+    state.customizeFirst = !state.customizeFirst;
+    button.classList.toggle("is-active", state.customizeFirst);
+    button.setAttribute("aria-pressed", String(state.customizeFirst));
+    button.title = state.customizeFirst ? "Customize agents: on" : "Customize agents: off";
+    button.innerHTML = icon("agent-customize");
+  } else if (action === "edit-agents" || action === "dock-add-role") {
+    void editAgents(button.dataset.roleId, action === "dock-add-role");
+  } else if (action === "return-debate") {
+    state.paused = false;
+    state.waitingForUser = false;
+    void setStage("debate");
+  } else if (action === "summary") {
     void requestSummary();
+  } else if (action === "summary-feedback") {
+    button.disabled = true;
+    try {
+      await requestJson(sessionApi(`/${state.sessionId}/feedback`), jsonOptions("POST", { helpful: button.dataset.helpful === "true" }));
+      state.summaryFeedback = button.dataset.helpful === "true";
+      const feedback = summaryDialog.querySelector("[data-summary-feedback]");
+      if (feedback) feedback.innerHTML = '<span>Thanks. Your feedback helps us improve.</span>';
+    } catch { button.disabled = false; workspace.notify("Couldn’t save your feedback. Try again."); }
   } else if (action === "regenerate-summary") {
     void regenerateSummary();
   } else if (action === "close-summary") {
     closeSummaryDialog();
+  } else if (action === "copy-summary") {
+    void copySummary(button);
   } else if (action === "retry-restore") {
     void restoreSession();
+  } else if (action === "retry-save") {
+    void retrySavingConversation();
   } else if (action === "go-stage") {
     void setStage(button.dataset.stage);
   } else if (action === "start-debate") {
@@ -1588,9 +1890,14 @@ function handleClick(event) {
   } else if (action === "toggle-pause") {
     void toggleDiscussionPause();
   } else if (action === "toggle-mentions") {
+    const input = appView.querySelector("[data-chat-input]");
+    const mention = input ? mentionAtCaret(input.value, input.selectionStart) : null;
+    state.mentionRange = mention?.range || (input ? [input.selectionStart, input.selectionEnd] : null);
+    state.mentionQuery = mention?.query || "";
+    state.mentionActiveIndex = 0;
     state.mentionOpen = !state.mentionOpen;
-    render();
-    if (state.mentionOpen) appView.querySelector("[data-action='mention-role']")?.focus();
+    syncMentionMenu();
+    input?.focus({ preventScroll: true });
   } else if (action === "mention-role") {
     insertMention(button.dataset.roleId);
   }
@@ -1602,12 +1909,33 @@ function regenerateSummary() {
   return true;
 }
 
+async function maybeSaveCheckpoint() {
+  const count = state.savedParticipantReplyCount;
+  if (state.readOnly || state.autoSummaryPending || state.summaryLoading || count < 3 || count - state.summaryMessageCount < 6 && state.summaryText) return;
+  const sessionId = state.sessionId;
+  const version = state.summaryContentVersion;
+  state.autoSummaryPending = true;
+  try {
+    const result = await requestJson(sessionSummaryApi(sessionId), jsonOptions("POST", {}, ROLE_REPLY_TIMEOUT_MS));
+    if (state.sessionId !== sessionId || state.summaryLoading) return;
+    state.summaryText = result.summary; state.summarySourceRevision = result.sourceRevision;
+    state.summaryMessageCount = result.summarizedMessageCount;
+    state.summaryDirty = state.summaryContentVersion !== version;
+    if (state.summaryOpen) renderSummaryDialog();
+  } catch { /* Checkpoints are optional; a failed refresh never interrupts the conversation. */ }
+  finally { state.autoSummaryPending = false; }
+}
+
 async function handleSubmit(event) {
   const form = event.target.closest("form[data-form]");
   if (!form || !appView.contains(form)) return;
   event.preventDefault();
 
   if (form.dataset.form === "question") {
+    const customizeFirst = state.customizeFirst;
+    if (workspace.uploading()) { workspace.notify("Wait for your attachments to finish uploading."); return; }
+    if (!state.question.trim() || state.roleGenerationPending || state.activeRoleGenerationRequestId !== null) return;
+    if (!await workspace.ensureReplyAvailable()) return;
     if (!state.question.trim() || state.roleGenerationPending || state.activeRoleGenerationRequestId !== null) return;
     const question = state.question;
     const requestId = ++state.roleGenerationSequence;
@@ -1615,7 +1943,7 @@ async function handleSubmit(event) {
     state.activeRoleGenerationRequestId = requestId;
     state.roleGenerationPending = true;
     state.roleGenerationPhase = "generating";
-    state.roleGenerationMessage = "Generating three role profiles. A format repair may be needed.";
+    state.roleGenerationMessage = "";
     state.roleGenerationError = false;
     render();
     let requestPhase = "generation";
@@ -1633,7 +1961,7 @@ async function handleSubmit(event) {
       if (!roleGenerationIsCurrent(requestId, question, roleEditVersion)) return;
 
       state.roleGenerationPhase = "saving";
-      state.roleGenerationMessage = "Saving the generated group…";
+      state.roleGenerationMessage = "Preparing your conversation…";
       render();
       if (!state.sessionId) {
         requestPhase = "session-save";
@@ -1643,6 +1971,9 @@ async function handleSubmit(event) {
         );
         if (!roleGenerationIsCurrent(requestId, question, roleEditVersion)) return;
         state.sessionId = created.session.id;
+        state.readOnly = false;
+        workspace.recordSession(created.session);
+        acknowledgeAttachments(draftStorage(), draftKey("new"), state.draftAttachments, 0);
         resetSummaryForSession(created.session.id);
         state.sessionRevisions.set(created.session.id, created.session.revision);
         state.savedParticipantReplyCount = countSavedParticipantReplies(created.session.messages);
@@ -1654,15 +1985,22 @@ async function handleSubmit(event) {
       state.nextRoleId = nextRoleNumber(generatedRoles);
       state.roleEditVersion += 1;
       state.groupBuilt = true;
-      const enteredParticipants = await setStage("participants", true, requestId);
-      if (enteredParticipants) rememberGeneratedNames(generatedRoles);
+      if (!customizeFirst) {
+        completeRoleGeneration(requestId);
+        if (!await saveSessionNow()) return;
+        rememberGeneratedNames(generatedRoles);
+        void startDebate();
+      } else {
+        const enteredParticipants = await setStage("participants", true, requestId);
+        if (enteredParticipants) rememberGeneratedNames(generatedRoles);
+      }
       return;
     } catch (error) {
       if (!roleGenerationIsCurrent(requestId, question, roleEditVersion)) return;
       state.roleGenerationError = true;
       state.roleGenerationMessage = requestPhase === "generation"
         ? roleGenerationErrorMessage(error)
-        : "Could not save the generated group. Please try again.";
+        : "Couldn’t save your agents. Try again.";
     } finally {
       if (state.activeRoleGenerationRequestId === requestId) {
         const stale = state.roleGenerationSequence !== requestId;
@@ -1684,7 +2022,10 @@ async function handleSubmit(event) {
 }
 
 async function restoreSession() {
+  await workspace.ready;
   const sessionId = state.sessionId || sessionIdFromLocation();
+  const restoreId = ++state.restoreSequence;
+  const ownerId = workspace.profile()?.id;
   if (!sessionId) return false;
   if (state.summarySessionId !== sessionId) resetSummaryForSession(sessionId);
   else {
@@ -1705,12 +2046,29 @@ async function restoreSession() {
   state.replyRetryTarget = null;
   state.pendingUserMessages = [];
   state.streamingReply = null;
+  state.pendingConversationStyle = "";
+  state.replyBlockedBySave = false;
   appView.setAttribute("aria-busy", "true");
   appView.innerHTML = "";
   try {
-    const result = await requestJson(sessionApi(`/${encodeURIComponent(sessionId)}`));
+    const share = new URLSearchParams(location.search).get("share");
+    if (!share && !await workspace.ensureSignedIn()) { window.location.assign(APP_PATH); return false; }
+    const result = await requestJson(sessionApi(`/${encodeURIComponent(sessionId)}${share ? `?share=${encodeURIComponent(share)}` : ''}`));
+    if (restoreId !== state.restoreSequence || workspace.profile()?.id !== ownerId) return false;
     const saved = result.session;
     state.sessionId = saved.id;
+    state.access = saved.access;
+    state.summaryFeedback = saved.feedback ?? null;
+    state.legacyLinkActive = Boolean(saved.legacyLinkActive);
+    state.sharingEnabled = Boolean(saved.sharingEnabled);
+    state.title = saved.customTitle || "";
+    state.readOnly = saved.access !== "owner";
+    state.archived = Boolean(saved.archived);
+    workspace.recordSession(saved);
+    if (saved.summary) {
+      state.summaryText = saved.summary.summary; state.summarySourceRevision = saved.summary.sourceRevision;
+      state.summaryMessageCount = saved.summary.summarizedMessageCount; state.summaryDirty = saved.summary.isStale;
+    }
     state.sessionRevisions.set(saved.id, saved.revision);
     state.conflictedSessions.delete(saved.id);
     state.question = saved.question;
@@ -1721,10 +2079,12 @@ async function restoreSession() {
     state.pendingUserMessages = saved.pendingUserMessages || [];
     state.unsavedMessageIds.clear();
     state.waitingForUser = false;
-    state.composeDraft = saved.draft;
+    state.composeDraft = recoverDraft(draftStorage(), draftKey(saved.id), saved.draft, saved.revision);
+    state.draftAttachments = recoverAttachments(draftStorage(), draftKey(saved.id), saved.draftAttachments, saved.revision);
     state.groupBuilt = true;
     state.debateStarted = saved.debateStarted;
-    state.paused = saved.paused;
+    state.roundComplete = saved.messages.at(-1)?.roundEnd === true && !state.pendingUserMessages.length;
+    state.paused = saved.paused || state.roundComplete;
     state.selectedRoleId = state.roles[0]?.id || "";
     state.nextRoleId = nextRoleNumber(state.roles);
     const latestMessage = state.messages.at(-1);
@@ -1732,8 +2092,8 @@ async function restoreSession() {
       const role = latestMessage.participantId
         ? state.roles.find((candidate) => candidate.id === latestMessage.participantId)
         : roleForChatMessage(latestMessage.body);
-      if (role) {
-        state.replyRetryTarget = { roleId: role.id, initial: false };
+      if (role || !/(?:^|\s)@/u.test(latestMessage.body)) {
+        state.replyRetryTarget = { roleId: role?.id || null, initial: false };
         state.replyMessage = "";
         state.replyDiagnostics = null;
       } else {
@@ -1750,20 +2110,23 @@ async function restoreSession() {
       }
     }
     state.stage = stageFromLocation();
-    if (state.stage === "debate" && !state.debateStarted) state.stage = "participants";
+    if (state.readOnly) state.stage = "debate";
+    else if (state.stage === "debate" && !state.debateStarted) state.stage = "participants";
     if (state.stage !== stageFromLocation()) {
       window.history.replaceState({ debateStage: state.stage }, "", stageUrl(state.stage));
     }
     state.saveStatus = "";
     state.saveFailed = false;
     render();
-    if (state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError) {
+    await workspace.ready;
+    if (state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn()) {
       void ensureDiscussionLoop(nextReplyForSavedConversation(), true);
     }
     return true;
   } catch (error) {
+    if (restoreId !== state.restoreSequence) return false;
     state.restoreFailed = true;
-    state.restoreMessage = error instanceof Error ? error.message : "Try again or start a new question.";
+    state.restoreMessage = error?.status === 404 ? "Check the link, or choose another conversation." : "Try again in a moment.";
     render();
     return false;
   } finally {
@@ -1794,7 +2157,7 @@ async function handlePopState() {
       state.restoreFailed = false;
       state.restoreMessage = "";
       state.question = "";
-      state.roles = DEFAULT_ROLES.map((role) => ({ ...role }));
+      state.roles = defaultRoles();
       state.roleEditVersion += 1;
       state.selectedRoleId = "role-1";
       state.nextRoleId = 4;
@@ -1804,6 +2167,7 @@ async function handlePopState() {
       state.unsavedMessageIds.clear();
       state.streamingReply = null;
       state.composeDraft = "";
+      state.draftAttachments = [];
       state.groupBuilt = false;
       state.debateStarted = false;
       state.paused = false;
@@ -1837,11 +2201,188 @@ function handlePageHide() {
   if (state.saveTimer !== null) void saveSessionNow();
 }
 
+async function editAgents(roleId, add = false) {
+  if (state.replyPending || !state.groupBuilt) return;
+  workspace.showAgentEditor(roleId || state.selectedRoleId, add);
+}
+
+async function saveAgent(roleId, values) {
+  if (state.replyPending || !state.groupBuilt || !values.name || !values.prompt) return false;
+  if (values.name.length > 48 || values.identity.length > 96 || values.prompt.length > 1000) return false;
+  if (!isAvatarColor(values.avatarColor)) return false;
+  if (roleId) {
+    const role = state.roles.find(item => item.id === roleId);
+    if (!role) return false;
+    Object.assign(role, values);
+  } else {
+    if (state.roles.length >= MAX_PARTICIPANTS) return false;
+    roleId = `role-${state.nextRoleId++}`;
+    state.roles.push({ id: roleId, avatar: initials(values.name), roleType: "Analyst", ...values });
+  }
+  state.selectedRoleId = roleId;
+  state.roleEditVersion += 1;
+  invalidateRoleGeneration();
+  render();
+  if (state.sessionId && !await saveSessionNow()) workspace.notify("Your edits are kept in this tab; the server could not save them yet.");
+  return true;
+}
+async function removeAgent(roleId) {
+  if (state.replyPending || state.roles.length <= 1) return false;
+  if (!state.roles.some(role => role.id === roleId)) return false;
+  state.roles = state.roles.filter(role => role.id !== roleId);
+  state.selectedRoleId = state.roles[0].id;
+  state.roleEditVersion += 1;
+  invalidateRoleGeneration();
+  render();
+  if (state.sessionId && !await saveSessionNow()) workspace.notify("Your edits are kept in this tab; the server could not save them yet.");
+  return true;
+}
+
+function handleComposerKeydown(event) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.target.matches("[data-chat-input]")) {
+    if (["ArrowDown", "ArrowUp"].includes(event.key) && state.mentionOpen) {
+      const roles = matchingMentionRoles();
+      if (roles.length) {
+        event.preventDefault();
+        state.mentionActiveIndex = (state.mentionActiveIndex + (event.key === "ArrowDown" ? 1 : -1) + roles.length) % roles.length;
+        syncMentionMenu();
+        appView.querySelector(`#mention-option-${state.mentionActiveIndex}`)?.scrollIntoView({ block: "nearest" });
+      }
+    } else if (event.key === "Escape" && state.mentionOpen) {
+      state.mentionOpen = false;
+      syncMentionMenu();
+      event.preventDefault();
+    } else if ((event.key === "Enter" && !event.shiftKey) || (event.key === "Tab" && state.mentionOpen)) {
+      const candidates = state.mentionOpen ? matchingMentionRoles() : [];
+      const role = candidates.length === 1 ? candidates[0] : candidates[state.mentionActiveIndex];
+      if (event.key === "Tab" && !role) return;
+      event.preventDefault();
+      if (role) insertMention(role.id);
+      else void submitChatMessage();
+    }
+  } else if (event.target.matches('[data-action="mention-role"]')) {
+    const buttons = [...appView.querySelectorAll('[data-action="mention-role"]')];
+    const index = buttons.indexOf(event.target);
+    if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+    } else if (event.key === "Escape") {
+      state.mentionOpen = false; syncMentionMenu(); appView.querySelector("[data-chat-input]")?.focus();
+    }
+  }
+}
+
+function cancelActiveWork() {
+  state.discussionLoopVersion += 1;
+  state.restartDiscussionAfterTask = false;
+  state.replyAbort?.abort();
+  state.activeReplyRequestId = null;
+  state.replyPending = false;
+  state.streamingReply = null;
+  invalidateRoleGeneration();
+  state.activeRoleGenerationRequestId = null;
+  state.roleGenerationPending = false;
+  state.summaryRequestSequence += 1;
+}
+
+function clearPrivateView() {
+  cancelActiveWork();
+  state.restoreSequence += 1;
+  if (state.saveTimer !== null) window.clearTimeout(state.saveTimer);
+  state.saveTimer = null;
+  state.sessionId = "";
+  state.question = "";
+  state.messages = [];
+  state.pendingUserMessages = [];
+  state.composeDraft = "";
+  state.draftAttachments = [];
+  state.groupBuilt = false;
+  state.debateStarted = false;
+  state.paused = false;
+  state.restoreFailed = false;
+  state.replyError = false;
+  state.saveFailed = false;
+  state.stage = "question";
+  resetSummaryForSession("");
+  window.history.replaceState({}, "", APP_PATH);
+  render();
+}
+
+async function prepareNavigation() {
+  if (state.readOnly || state.restoreFailed || !workspace.isSignedIn()) return true;
+  if (workspace.uploading()) { workspace.notify("Wait for the upload to finish, or remove it before switching debates."); return false; }
+  cancelActiveWork();
+  if (!state.sessionId || state.conflictedSessions.has(state.sessionId)) return true;
+  if (state.debateStarted) state.paused = true;
+  render();
+  const saved = await saveSessionNow();
+  return saved || [401, 404, 409].includes(state.saveErrorStatus);
+}
+const workspace = createWorkspace({
+  basePath: BASE_PATH,
+  appPath: APP_PATH,
+  getState: () => state,
+  refresh: render,
+  attachmentsChanged: (saveNow = false) => { rememberComposeDraft(); return state.sessionId ? scheduleSessionSave(saveNow) : true; },
+  beforeNavigate: prepareNavigation,
+  beforeSignOut: async () => {
+    cancelActiveWork();
+    if (state.sessionId && !state.readOnly && !state.restoreFailed) {
+      state.paused = true;
+      rememberComposeDraft();
+      await saveSessionNow();
+    }
+  },
+  sessionEnded: clearPrivateView,
+  usageChanged: usage => {
+    if (usage?.remaining === 0 && state.debateStarted && !state.readOnly && !state.paused) {
+      state.paused = true;
+      state.discussionLoopVersion += 1;
+      state.restartDiscussionAfterTask = false;
+      scheduleSessionSave();
+    }
+  },
+  saveAgent,
+  removeAgent,
+  useQuestion: async (question) => {
+    if (state.sessionId) {
+      if (!await prepareNavigation()) return false;
+      rememberStartIntent(sessionStorage, question);
+      window.location.assign(`${APP_PATH}?start=1&question=${encodeURIComponent(question)}`);
+      return true;
+    }
+    if (state.roleGenerationPending) { workspace.notify("Wait for the current group to finish."); return false; }
+    if (question !== state.question) invalidateRoleGeneration();
+    state.question = question;
+    state.stage = "question";
+    render();
+    void handleSubmit({ target: appView.querySelector('[data-form="question"]'), preventDefault() {} });
+    return true;
+  },
+
+});
+if (!state.sessionId) {
+  state.question = (new URLSearchParams(location.search).get("question") || "").slice(0, 2000);
+  state.draftAttachments = recoverAttachments(draftStorage(), draftKey("new"), [], 0);
+}
+
 try {
   runtime.readConfig();
   appView.addEventListener("input", handleInput);
+  appView.addEventListener("pointerdown", event => {
+    if (event.target.closest('[data-action="mention-role"], [data-action="toggle-mentions"]')) event.preventDefault();
+  });
+  document.addEventListener("pointerdown", event => {
+    if (state.mentionOpen && !event.target.closest('#mention-menu, [data-action="toggle-mentions"]')) {
+      state.mentionOpen = false;
+      syncMentionMenu();
+    }
+  });
+  window.addEventListener("resize", resizeQuestionInput);
+  appView.addEventListener("keydown", handleComposerKeydown);
   appView.addEventListener("change", handleChange);
   appView.addEventListener("click", handleClick);
+  stageNavigation.addEventListener("click", handleClick);
   appView.addEventListener("submit", handleSubmit);
   summaryDialog?.addEventListener("click", handleClick);
   summaryDialog?.addEventListener("cancel", (event) => {
@@ -1859,7 +2400,36 @@ try {
     }
     render();
     runtime.markReady();
+    if (new URLSearchParams(location.search).get("start") === "1" && state.question.trim() && consumeStartIntent(sessionStorage, state.question)) {
+      void workspace.ready.then(() => handleSubmit({ target: appView.querySelector('[data-form="question"]'), preventDefault() {} }));
+    }
   }
 } catch (error) {
   runtime.showFatalError(error);
 }
+
+// Shared readers follow saved turns, never run agents or spend anyone's allowance.
+let viewerPollBusy = false;
+window.setInterval(async () => {
+  if (!state.readOnly || !state.sessionId || state.restoreFailed || document.hidden || viewerPollBusy) return;
+  const sessionId = state.sessionId;
+  const share = new URLSearchParams(location.search).get("share");
+  viewerPollBusy = true;
+  try {
+    const result = await requestJson(sessionApi(`/${sessionId}${share ? `?share=${encodeURIComponent(share)}` : ''}`));
+    if (state.sessionId !== sessionId) return;
+    const saved = result.session;
+    if (saved.revision !== state.sessionRevisions.get(sessionId)) {
+      state.title = saved.customTitle || ""; state.question = saved.question; state.roles = saved.participants; state.messages = saved.messages;
+      state.savedParticipantReplyCount = countSavedParticipantReplies(saved.messages);
+      state.sessionRevisions.set(sessionId, saved.revision);
+      render();
+    }
+    if (saved.summary) {
+      state.summaryText = saved.summary.summary; state.summaryDirty = saved.summary.isStale;
+      if (state.summaryOpen) renderSummaryDialog();
+    }
+  } catch (error) {
+    if (error.status === 404) { state.restoreFailed = true; state.restoreMessage = "This viewing link is no longer available."; render(); }
+  } finally { viewerPollBusy = false; }
+}, 5000);

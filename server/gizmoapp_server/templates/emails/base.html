@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <meta name="x-apple-disable-message-reformatting">
+    <title>{{ subject }}</title>
+    <style>
+      body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+      img { border: 0; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; }
+      table { border-collapse: separate; }
+      a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
+      @media screen and (max-width: 560px) {
+        .email-outer { padding: 20px 12px !important; }
+        .email-content { padding: 28px 24px 30px !important; }
+        .email-heading { font-size: 26px !important; line-height: 33px !important; }
+        .brand-header, .brand-inner { height: 140px !important; }
+        .brand-logo { width: 254px !important; height: auto !important; }
+        .code-panel { padding: 22px 10px !important; }
+        .verification-code { font-size: 33px !important; letter-spacing: 7px !important; }
+        .email-footer { padding: 18px 16px !important; }
+      }
+    </style>
+  </head>
+  <body style="margin:0;padding:0;width:100%;background-color:#f1f2f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#292d3a;">
+    <div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{{ preheader }}</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1f2f7" style="width:100%;background-color:#f1f2f7;">
+      <tr>
+        <td class="email-outer" align="center" style="padding:40px 20px;">
+          <!--[if mso]><table role="presentation" width="520" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
+          <table role="presentation" class="email-card" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fbfbfe" style="width:100%;max-width:520px;background-color:#fbfbfe;border:1px solid #e1e4ee;border-radius:16px;overflow:hidden;">
+            <tr>
+              <td class="brand-header" align="center" height="172" background="{{ banner_src }}" bgcolor="#9acaf6" style="height:172px;background-color:#9acaf6;background-image:url('{{ banner_src }}');background-position:center;background-repeat:no-repeat;background-size:cover;border-radius:15px 15px 0 0;">
+                <!--[if gte mso 9]><v:rect fill="true" stroke="false" style="width:520px;height:172px;"><v:fill type="frame" src="{{ banner_src }}" color="#9acaf6"/><v:textbox inset="0,0,0,0"><![endif]-->
+                <table role="presentation" class="brand-inner" width="100%" height="172" cellspacing="0" cellpadding="0" border="0" style="width:100%;height:172px;">
+                  <tr><td align="center" valign="middle" style="padding:0 20px;"><img class="brand-logo" src="{{ logo_src }}" alt="Debate Agora" width="280" height="93" style="display:block;width:280px;height:auto;max-width:100%;border:0;color:#252936;font-size:24px;line-height:32px;"></td></tr>
+                </table>
+                <!--[if gte mso 9]></v:textbox></v:rect><![endif]-->
+              </td>
+            </tr>
+            <tr>
+              <td class="email-content" style="padding:32px 40px 34px;">
+                {% block content %}{% endblock %}
+              </td>
+            </tr>
+          </table>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:520px;">
+            <tr><td class="email-footer" align="center" style="padding:20px 16px;font-size:12px;line-height:20px;color:#949aab;"><a href="{{ app_url }}" style="color:#8b92a5;text-decoration:none;">{{ site_label }}</a></td></tr>
+          </table>
+          <!--[if mso]></td></tr></table><![endif]-->
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

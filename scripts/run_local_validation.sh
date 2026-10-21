@@ -12,6 +12,7 @@ PYDEPS_DIR="$ROOT_DIR/.pydeps"
 
 run_unittests() {
   "$@" -m unittest discover -s tests -v
+  node --test tests/test_frontend_*.mjs
 }
 
 if [ -x "$VENV_PYTHON" ]; then

@@ -4,6 +4,8 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+if not (Path(__file__).resolve().parents[1] / 'tools' / 'remote_exec.py').is_file():
+    raise unittest.SkipTest('Optional external remote-exec tool is not distributed with this app.')
 import remote_exec  # noqa: E402
 
 

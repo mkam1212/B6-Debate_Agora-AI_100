@@ -1,0 +1,19 @@
+{% extends "emails/base.html" %}
+{% block content %}
+<h1 class="email-heading" style="margin:0 0 12px;font-size:28px;line-height:36px;font-weight:600;letter-spacing:-0.7px;color:#292d3a;">You’re invited.</h1>
+<p style="margin:0 0 26px;color:#767e91;font-size:15px;line-height:24px;"><strong style="color:#414961;font-weight:600;">{{ inviter_name }}</strong> invited you to Debate Agora. Think through questions with a few different AI perspectives.</p>
+<p style="margin:0 0 8px;color:#4f5f79;font-size:18px;line-height:28px;font-weight:500;">You both get <strong style="font-weight:600;color:#246cf6;">{{ reward }} extra AI replies.</strong></p>
+<p style="margin:0 0 28px;color:#8b93a7;font-size:12px;line-height:20px;">Create an account and verify your email to unlock them.</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;">
+  <tr>
+    <td align="center" style="padding:0 0 26px;">
+      <!--[if mso]><v:roundrect href="{{ invite_url }}" style="height:46px;v-text-anchor:middle;width:236px;" arcsize="50%" stroke="f" fillcolor="#246cf6"><w:anchorlock/><center style="color:#ffffff;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;">Join Debate Agora</center></v:roundrect><![endif]-->
+      <!--[if !mso]><!--><a href="{{ invite_url }}" style="display:inline-block;min-width:180px;padding:14px 28px;border:1px solid #246cf6;border-radius:999px;background-color:#246cf6;color:#ffffff;text-decoration:none;font-size:14px;line-height:18px;font-weight:500;text-align:center;mso-hide:all;">Join Debate Agora</a><!--<![endif]-->
+    </td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;table-layout:fixed;">
+  <tr><td style="padding-top:20px;border-top:1px solid #e8eaf2;font-size:11px;line-height:19px;color:#969daf;">Or open this invitation link:<br><a href="{{ invite_url }}" style="color:#7883aa;text-decoration:underline;word-break:break-all;overflow-wrap:anywhere;">{{ invite_url }}</a></td></tr>
+  <tr><td style="padding-top:16px;font-size:11px;line-height:19px;color:#969daf;">Not expecting this invitation? You can ignore it.</td></tr>
+</table>
+{% endblock %}

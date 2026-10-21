@@ -30,15 +30,22 @@ def _session_payload(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "question": row["question"],
+        "title": row["title"] or row["question"],
+        "customTitle": row["title"],
+        "legacyDisabled": bool(row["legacy_disabled"]),
+        "sharingEnabled": bool(row["share_hash"]),
         "participants": _load(row["participants_json"], []),
         "messages": _load(row["messages_json"], []),
         "pendingUserMessages": _load(row["pending_user_messages_json"], []),
         "draft": row["draft"],
+        "draftAttachments": _load(row["draft_attachments_json"], []),
         "debateStarted": bool(row["debate_started"]),
         "paused": bool(row["paused"]),
         "revision": int(row["revision"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "ownerId": row["owner_id"],
+        "archived": bool(row["archived"]),
     }
 
 
@@ -50,7 +57,7 @@ def fetch_session(connection: sqlite3.Connection, session_id: str) -> dict[str, 
     return _session_payload(row) if row is not None else None
 
 
-def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any]) -> dict[str, Any]:
+def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any], owner_id: str | None = None, *, commit=True) -> dict[str, Any]:
     session_id = uuid.uuid4().hex
     now = _now()
     with WRITE_LOCK:
@@ -58,8 +65,8 @@ def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any]) -> 
             """
             INSERT INTO debate_sessions (
                 id, question, participants_json, messages_json, pending_user_messages_json, draft,
-                debate_started, paused, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                debate_started, paused, created_at, updated_at, draft_attachments_json, owner_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -72,9 +79,12 @@ def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any]) -> 
                 int(snapshot["paused"]),
                 now,
                 now,
+                _dump(snapshot.get("draftAttachments", [])),
+                owner_id,
             ),
         )
-        connection.commit()
+        if commit:
+            connection.commit()
     return fetch_session(connection, session_id) or {}
 
 
@@ -84,13 +94,27 @@ def update_session(
     snapshot: dict[str, Any],
     expected_revision: int,
 ) -> dict[str, Any] | None:
+    from .debate_replies import merge_committed_replies, only_reply_revisions
     now = _now()
     with WRITE_LOCK:
+        connection.execute("BEGIN IMMEDIATE")
+        current = fetch_session(connection, session_id)
+        if current is None or not only_reply_revisions(connection, session_id, expected_revision, current['revision']):
+            connection.rollback()
+            return None
+        original_ids = {m.get('id') for m in snapshot['messages']}
+        snapshot = {**snapshot, 'messages': merge_committed_replies(connection, session_id, snapshot['messages'])}
+        if current['messages'] and current['messages'][-1].get('roundEnd') and current['messages'][-1].get('id') not in original_ids and not snapshot['pendingUserMessages']:
+            snapshot['paused'] = True
+        from .debate_api import MAX_SESSION_MESSAGES, MAX_SESSION_SNAPSHOT_BYTES
+        if len(snapshot['messages']) + len(snapshot['pendingUserMessages']) > MAX_SESSION_MESSAGES or len(_dump(snapshot).encode()) > MAX_SESSION_SNAPSHOT_BYTES:
+            connection.rollback()
+            raise ValueError('This conversation is full. Start a new debate to keep going.')
         cursor = connection.execute(
             """
             UPDATE debate_sessions
             SET question = ?, participants_json = ?, messages_json = ?, pending_user_messages_json = ?, draft = ?,
-                debate_started = ?, paused = ?, updated_at = ?, revision = revision + 1
+                debate_started = ?, paused = ?, updated_at = ?, draft_attachments_json = ?, revision = revision + 1
             WHERE id = ? AND revision = ?
             """,
             (
@@ -102,8 +126,9 @@ def update_session(
                 int(snapshot["debateStarted"]),
                 int(snapshot["paused"]),
                 now,
+                _dump(snapshot.get("draftAttachments", [])),
                 session_id,
-                expected_revision,
+                current['revision'],
             ),
         )
         if cursor.rowcount == 0:

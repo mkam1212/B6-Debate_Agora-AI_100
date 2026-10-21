@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Debate Agora — Good ideas have company.</title>
+    <meta name="description" content="Bring a decision. Explore the trade-offs with different AI perspectives. A conversation you can make your own.">
+    <meta name="theme-color" content="#faf9f6">
+    <base href="{{ base_href }}">
+    <link rel="icon" href="{{ icon_url }}" sizes="192x192">
+    <link rel="stylesheet" href="{{ asset_base }}surface-tokens.css?v=glass-31">
+    <link rel="stylesheet" href="{{ asset_base }}home.css?v=glass-31">
+  </head>
+  <body id="top" class="home-body">
+    <a class="home-skip" href="{{ base_href }}#main">Skip to content</a>
+    <header class="home-header home-width">
+      <a class="home-brand" href="{{ base_href }}" aria-label="Debate Agora home"><img src="{{ asset_base }}assets/debate-agora-wordmark.png" alt="Debate Agora" width="2172" height="724"></a>
+      <nav class="home-nav" aria-label="Main navigation">
+        <a class="home-open" href="{{ base_href }}app">Open app</a>
+      </nav>
+    </header>
+    <main id="main">
+      <section class="home-hero" aria-labelledby="hero-title">
+        <img class="home-ambient" src="{{ asset_base }}assets/daylight-glass-v1.png" alt="" width="1536" height="1024" fetchpriority="high" decoding="async">
+        <div class="hero-copy">
+          <h1 id="hero-title">Good ideas<br>have company.</h1>
+          <p class="hero-intro">Bring a decision. Explore the trade-offs with different AI perspectives.</p>
+          <form class="home-question" action="{{ base_href }}app" method="get"><input type="hidden" name="start" value="1">
+            <label class="visually-hidden" for="home-question">What would you like to debate?</label>
+            <textarea id="home-question" name="question" rows="2" maxlength="2000" placeholder="What’s on your mind?" required></textarea>
+            <div class="question-toolbar"><button type="submit" class="home-start" aria-label="Start a debate" title="Start a debate"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 19V5"/></svg></button></div>
+          </form>
+          <div class="question-starters" aria-label="Questions to start with">
+            <span>Or try</span>
+            <a href="{{ base_href }}app?start=1&amp;question=Should%20we%20launch%20now%20or%20keep%20refining%3F">a product idea</a>
+            <a href="{{ base_href }}app?start=1&amp;question=Would%20a%20four-day%20workweek%20work%20for%20our%20team%3F">a work question</a>
+            <a href="{{ base_href }}app?start=1&amp;question=Should%20I%20turn%20my%20side%20project%20into%20a%20business%3F">a big decision</a>
+          </div>
+        </div>
+      </section>
+      <section class="home-conversations home-width" aria-labelledby="examples-title">
+        <div class="section-heading">
+          <h2 id="examples-title">Different minds.<br>One conversation.</h2>
+        </div>
+        <div class="home-example" aria-label="Example conversation">
+          <div class="example-top">
+            <div class="example-tabs" role="tablist" aria-label="Example topics">
+              <button id="example-tab-product" role="tab" aria-selected="true" aria-controls="conversation-example" data-example="product" tabindex="0">Product</button>
+              <button id="example-tab-work" role="tab" aria-selected="false" aria-controls="conversation-example" data-example="work" tabindex="-1">Work</button>
+              <button id="example-tab-life" role="tab" aria-selected="false" aria-controls="conversation-example" data-example="life" tabindex="-1">Life</button>
+            </div>
+          </div>
+          <div id="conversation-example" class="example-conversation" role="tabpanel" aria-labelledby="example-tab-product" tabindex="0">
+            <h3 data-example-title>Launch now, or keep refining?</h3>
+            <div class="example-messages" data-example-messages>
+              <div class="example-message"><span class="example-avatar tone-maya" aria-hidden="true"><img src="{{ asset_base }}assets/avatars/maya-agent-v1.svg" alt="" width="32" height="32"></span><div class="example-copy"><strong>Maya.ai</strong><p>Launch now. Another week polishing won’t tell us whether anyone wants this.</p></div></div>
+              <div class="example-message"><span class="example-avatar tone-alex" aria-hidden="true"><img src="{{ asset_base }}assets/avatars/alex-agent-v1.svg" alt="" width="32" height="32"></span><div class="example-copy"><strong>Alex.ai</strong><p>Not while sign-up is broken. Fix onboarding first, or we’re testing patience, not demand.</p></div></div>
+              <div class="example-message example-you"><span class="example-avatar tone-you" aria-hidden="true"><img src="{{ asset_base }}assets/avatars/you-candid-v2.png" alt="" width="32" height="32"></span><div class="example-copy"><strong>You</strong><p><span class="example-mention">@Sam.ai</span> What if we invite just a few people first?</p></div></div>
+              <div class="example-message"><span class="example-avatar tone-sam" aria-hidden="true"><img src="{{ asset_base }}assets/avatars/sam-agent-v1.svg" alt="" width="32" height="32"></span><div class="example-copy"><strong>Sam.ai</strong><p>Only if they can finish the core task. Ten confused users still won’t tell us whether the idea works.</p></div></div>
+            </div>
+          </div>
+          <div class="example-footer"><a class="example-try" data-example-link href="{{ base_href }}app?start=1&amp;question=Should%20we%20launch%20now%20or%20keep%20refining%3F">Try this question <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></a></div>
+        </div>
+      </section>
+      <section id="how-it-works" class="home-details home-width" aria-labelledby="details-title">
+        <div class="details-intro"><h2 id="details-title">Your table.<br>Your way.</h2><img class="home-illustration" src="{{ asset_base }}assets/conversation-table-v2.png" alt="" width="480" height="320" loading="lazy" decoding="async"></div>
+        <div class="home-features">
+          <article><h3>Create different perspectives.</h3><p>The LLM gives each agent a name, personality, and point of view based on its role.</p></article>
+          <article><h3>More information. More ideas.</h3><p>Add images, files, or ideas. @mention an agent to talk to it directly.</p></article>
+          <article><h3>Let others follow along.</h3><p>Share a viewing link so others can follow the discussion.</p></article>
+        </div>
+      </section>
+      <section class="home-invitation home-width" aria-labelledby="invitation-title">
+        <h2 id="invitation-title">Let’s think it through.</h2>
+        <a class="home-return" href="{{ base_href }}#home-question" data-focus-question>Start a conversation</a>
+      </section>
+    </main>
+    <footer class="home-footer home-width">
+      <p class="home-copyright">© {{ year }} <span>Guolin Wang</span>, <span>Matthew Kam</span> &amp; <span>Oliver Liu</span>. All rights reserved.</p>
+      <p class="home-course">Created for the UBC AI 100 course.</p>
+    </footer>
+    <script type="module" src="{{ asset_base }}home.js?v=product-76-nav-73"></script>
+  </body>
+</html>

@@ -101,6 +101,8 @@ class PreinstalledCheckoutTests(unittest.TestCase):
         self.assertNotIn("pip install", calls)
         self.assertIn("init-db", calls)
 
+    @unittest.skipUnless((FIXTURES / 'gizmoapp_7dbc70b_install_checkout.sh').is_file(),
+                         'Optional historical installer fixture is not distributed with this app.')
     def test_prior_release_rebuilds_shim_when_new_image_target_is_missing(self):
         spec = importlib.util.spec_from_file_location(
             "prior_dependency_readiness", FIXTURES / "codingworkspace_591eb44_venv.py"

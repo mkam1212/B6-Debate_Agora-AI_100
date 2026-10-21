@@ -15,6 +15,8 @@ def create_app(test_config: dict | None = None, shell_variant: str | None = None
     from .config import load_settings
     from .db import close_db, initialize_database, verify_database_schema
     from .debate_api import register_debate_routes
+    from .account_api import register_account_routes
+    from .attachments import register_attachment_routes
     from .shells import shell_settings
     from .views import register_page_routes
 
@@ -31,6 +33,11 @@ def create_app(test_config: dict | None = None, shell_variant: str | None = None
 
     if test_config:
         app.config.update(test_config)
+        # Tests explicitly opt into the real-tool adapter and replace its network transport.
+        if app.config["TESTING"] and "WEB_SEARCH_ENABLED" not in test_config:
+            app.config["WEB_SEARCH_ENABLED"] = False
+    if not test_config or "SESSION_COOKIE_PATH" not in test_config:
+        app.config["SESSION_COOKIE_PATH"] = app.config["URL_PREFIX"] or "/"
 
     app.config.update(shell_settings(app.config.get("APP_SHELL")))
 
@@ -47,5 +54,9 @@ def create_app(test_config: dict | None = None, shell_variant: str | None = None
     register_media_routes(app)
     register_api_routes(app)
     register_debate_routes(app)
+    register_account_routes(app)
+    register_attachment_routes(app)
+    from .session_access import register_session_access_routes
+    register_session_access_routes(app)
     register_page_routes(app)
     return app

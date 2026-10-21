@@ -16,6 +16,21 @@ from server.gizmoapp_server.db import (
 
 
 class DatabaseHardeningTests(unittest.TestCase):
+    def test_avatar_color_migration_preserves_existing_accounts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "accounts.sqlite3"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+                for version in range(1, 10):
+                    connection.executescript(SCHEMA_MIGRATIONS[version])
+                    connection.execute("INSERT INTO schema_migrations VALUES (?)", (version,))
+                connection.execute("INSERT INTO account_users VALUES (?,?,?,?,?)", ("old-user", "Existing name", "existing@example.com", "existing-password-hash", 100))
+                connection.commit()
+            initialize_database({"DB_PATH": db_path})
+            initialize_database({"DB_PATH": db_path})
+            with sqlite3.connect(db_path) as connection:
+                self.assertEqual(connection.execute("SELECT name,email,password_hash,avatar_color FROM account_users").fetchone(), ("Existing name", "existing@example.com", "existing-password-hash", "#4667a5"))
+
     def test_session_revision_migration_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "app.sqlite3"

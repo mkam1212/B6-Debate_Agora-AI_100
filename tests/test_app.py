@@ -88,6 +88,40 @@ class GizmoAppTestCase(unittest.TestCase):
         self.assertEqual(statuses["audio"], "disabled")
         self.assertEqual(statuses["mapping"], "disabled")
 
+    def test_text_home_and_application_routes_preserve_links_assets_and_api(self):
+        app = self.make_app("/agora", shell_variant="text")
+        client = app.test_client()
+        home = client.get("/agora/").get_data(as_text=True)
+        self.assertIn('class="home-body"', home)
+        self.assertIn('class="home-open" href="/agora/app"', home)
+        self.assertIn('action="/agora/app"', home)
+        for path in ("/agora/app", "/agora/app/participants", "/agora/app/debate"):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn('id="app-view"', page)
+            self.assertIn('<base href="/agora/">', page)
+            self.assertIn('/agora/api', page)
+        asset = client.get("/agora/app/text/debate.js")
+        self.assertEqual(asset.status_code, 200)
+        asset.close()
+        self.assertEqual(client.get("/agora/api/debate/status").status_code, 200)
+        for old, new in (("home", ""), ("participants?session=abc", "app/participants?session=abc"), ("debate?session=abc", "app/debate?session=abc"), ("?invite=abc", "app?invite=abc")):
+            response = client.get("/agora/" + old)
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/agora/" + new)
+
+    def test_text_routes_use_trusted_proxy_mount_without_changing_api_base(self):
+        app = self.make_app(shell_variant="text", TRUST_PROXY=True)
+        client = app.test_client()
+        headers = {"X-Forwarded-Prefix": "/preview/team"}
+        home = client.get("/", headers=headers).get_data(as_text=True)
+        self.assertIn('href="/preview/team/app"', home)
+        page = client.get("/app/debate?session=abc", headers=headers).get_data(as_text=True)
+        self.assertIn('<base href="/preview/team/">', page)
+        self.assertIn('/preview/team/api', page)
+        self.assertEqual(client.get("/debate?session=abc", headers=headers).headers["Location"], "/preview/team/app/debate?session=abc")
+
     def test_pwa_routes_are_not_exposed(self):
         app = self.make_app("/demo-app")
         client = app.test_client()
@@ -194,7 +228,7 @@ class GizmoAppTestCase(unittest.TestCase):
         for shell in ("graphical", "text"):
             with self.subTest(shell=shell):
                 app = self.make_app(shell_variant=shell)
-                html = app.test_client().get("/").get_data(as_text=True)
+                html = app.test_client().get("/app" if shell == "text" else "/").get_data(as_text=True)
                 self.assertIn('id="app-error"', html)
                 self.assertIn("boot.js", html)
                 self.assertNotIn("manifest.webmanifest", html)

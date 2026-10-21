@@ -1,0 +1,18 @@
+:root {
+  --agora-page: #faf9f6;
+  --agora-ink: #2b2c29;
+  --agora-muted: #757970;
+  --agora-accent: #246cf6;
+  --agora-line: #e5e6de;
+  --agora-glass-border: #ffffffb8;
+  --agora-glass-surface: linear-gradient(135deg, #ffffff99, #ffffff57);
+  --agora-glass-dialog: linear-gradient(135deg, #ffffffc2, #ffffff80);
+  --agora-glass-input: linear-gradient(135deg, #ffffff57, #ffffff1f 55%, #ffffff38);
+  --agora-glass-control: #ffffff4d;
+  --agora-glass-filter: blur(20px) saturate(1.15);
+  --agora-glass-control-filter: blur(20px) saturate(1.25);
+  --agora-glass-shadow: 0 0 0 1px #7e8b7114, 0 20px 50px -30px #333e2729, inset 0 1px 0 #ffffffcc;
+  --agora-input-shadow: 0 0 0 1px #69775b12, 0 12px 36px -16px #3c443329, inset 0 1px 1px #ffffffb3, inset 0 -1px 0 #ffffff38;
+  --agora-control-border: #a7b29b40;
+  --agora-focus-border: #9ca98e99;
+}

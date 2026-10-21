@@ -42,7 +42,10 @@ export async function requestJson(url, options = {}) {
 
 export async function requestEventStream(url, options = {}, onEvent) {
   const controller = new AbortController();
-  const { timeoutMs = runtimeTimeout(), ...fetchOptions } = options;
+  const { timeoutMs = runtimeTimeout(), signal, ...fetchOptions } = options;
+  const cancel = () => controller.abort();
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   let reader;
   let streamFinished = false;
@@ -109,6 +112,7 @@ export async function requestEventStream(url, options = {}, onEvent) {
     throw error;
   } finally {
     window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
     if (reader && !streamFinished) await reader.cancel().catch(() => {});
     reader?.releaseLock();
   }

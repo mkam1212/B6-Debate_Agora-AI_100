@@ -5,28 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Debate Agora</title>
     <meta name="description" content="Bring a question to a thoughtful group conversation.">
-    <meta name="theme-color" content="#f7f3eb">
+    <meta name="theme-color" content="#faf9f6">
     <base href="{{ base_href }}">
     <link rel="icon" href="{{ icon_url }}" sizes="192x192">
     <link rel="stylesheet" href="{{ shared_asset_base }}base.css">
-    <link rel="stylesheet" href="{{ asset_base }}debate.css">
+    <link rel="stylesheet" href="{{ asset_base }}surface-tokens.css?v=glass-31">
+    <link rel="stylesheet" href="{{ asset_base }}debate.css?v=delivery-80">
+    <link rel="stylesheet" href="{{ asset_base }}app-surfaces.css?v=glass-31">
+    <link rel="stylesheet" href="{{ asset_base }}dialogs.css?v=allowance-78">
   </head>
   <body class="shell-body debate-body">
-    <a class="skip-link" href="#app-view">Skip to main content</a>
+    <a class="skip-link" href="{{ current_page }}#app-view">Skip to main content</a>
     <div class="debate-shell" id="app">
-      <header class="site-header">
-        <a class="brand" href="{{ base_href }}" aria-label="Debate Agora home">
-          Debate Agora
-        </a>
-        <div id="stage-navigation" class="stage-navigation"></div>
-      </header>
-      <main id="app-view" class="app-content" tabindex="-1" aria-label="Debate"></main>
+      <aside id="workspace-sidebar" class="workspace-sidebar" aria-label="Sidebar"></aside>
+      <button class="drawer-dismiss" data-workspace="close-drawers" aria-label="Dismiss side panel" tabindex="-1"></button>
+      <div class="workspace-body">
+        <header id="stage-navigation" class="site-header"></header>
+        <main id="app-view" class="app-content" tabindex="-1" aria-label="Debate"></main>
+      </div>
     </div>
-    <dialog id="summary-dialog" class="summary-dialog" aria-labelledby="summary-dialog-title"></dialog>
+    <dialog id="workspace-dialog" class="workspace-dialog" aria-labelledby="workspace-dialog-title"></dialog>
+    <div id="workspace-toast" class="workspace-toast" role="status" hidden></div>
+    <dialog id="summary-dialog" class="summary-dialog polished-dialog" aria-labelledby="summary-dialog-title"></dialog>
     <div id="app-error" class="app-error" role="alert" aria-live="assertive" hidden></div>
 
     <script id="gizmoapp-config" type="application/json">{{ client_config | tojson }}</script>
     <script src="{{ shared_asset_base }}boot.js"></script>
-    <script type="module" src="{{ asset_base }}debate.js"></script>
+    <script type="module" src="{{ asset_base }}debate.js?v=delivery-80"></script>
   </body>
 </html>

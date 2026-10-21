@@ -5,6 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from flask import Flask
+
 from server.gizmoapp_server import llm
 
 
@@ -17,6 +19,52 @@ class CourseLLMTests(unittest.TestCase):
         with patch.dict(os.environ, {"GIZMO_LLM_API_KEY": "test-key"}, clear=True), patch.object(llm, "OpenAI", Mock()):
             with self.assertRaisesRegex(llm.CourseLLMError, "GIZMO_LLM_BASE_URL"):
                 llm.ask("hello")
+
+    def test_model_settings_are_read_from_backend_app_config(self):
+        app = Flask(__name__)
+        app.config.update(
+            GIZMO_LLM_API_KEY="backend-only-test-key",
+            GIZMO_LLM_BASE_URL="https://api.openai.com/v1",
+            GIZMO_LLM_MODEL="gpt-6-luna",
+            GIZMO_LLM_TIMEOUT_SECONDS="15",
+        )
+        completion = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Hello"))])
+        client = Mock()
+        client.base_url = "https://api.openai.com/v1/"
+        client.chat.completions.create.return_value = completion
+        factory = Mock(return_value=client)
+        with patch.dict(os.environ, {}, clear=True), app.app_context(), patch.object(llm, "OpenAI", factory):
+            self.assertTrue(llm.is_configured())
+            self.assertEqual(llm.ask("hello", max_tokens=100), "Hello")
+            self.assertNotIn("GIZMO_LLM_API_KEY", os.environ)
+
+        factory.assert_called_once_with(api_key="backend-only-test-key", base_url="https://api.openai.com/v1", timeout=15.0, max_retries=1)
+        client.chat.completions.create.assert_called_once_with(
+            model="gpt-6-luna", messages=[{"role": "user", "content": "hello"}],
+            max_completion_tokens=100, reasoning_effort="none",
+        )
+
+    def test_process_model_setting_overrides_app_config_and_can_disable_access(self):
+        app = Flask(__name__)
+        app.config.update(GIZMO_LLM_API_KEY="backend-only-test-key", GIZMO_LLM_BASE_URL="https://api.openai.com/v1", GIZMO_LLM_MODEL="gpt-6-luna")
+        with app.app_context(), patch.dict(os.environ, {"GIZMO_LLM_MODEL": "explicit-model"}, clear=True):
+            self.assertEqual(llm.model_name(), "explicit-model")
+        with app.app_context(), patch.dict(os.environ, {"GIZMO_LLM_API_KEY": ""}, clear=True):
+            self.assertFalse(llm.is_configured())
+
+    def test_official_stream_uses_supported_parameters_without_gateway_extensions(self):
+        client = Mock()
+        client.base_url = "https://api.openai.com/v1/"
+        client.chat.completions.create.return_value = iter([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Hello"), finish_reason="stop")])
+        ])
+        environment = {"GIZMO_LLM_API_KEY": "test-key", "GIZMO_LLM_BASE_URL": "https://api.openai.com/v1", "GIZMO_LLM_MODEL": "gpt-6-luna"}
+        with patch.dict(os.environ, environment, clear=True), patch.object(llm, "OpenAI", Mock(return_value=client)):
+            self.assertEqual(list(llm.stream_chat([{"role": "user", "content": "hello"}], max_tokens=100)), ["Hello"])
+        client.chat.completions.create.assert_called_once_with(
+            model="gpt-6-luna", messages=[{"role": "user", "content": "hello"}],
+            max_completion_tokens=100, stream=True, reasoning_effort="none",
+        )
 
     def test_client_has_bounded_timeout_and_retry(self):
         completion = SimpleNamespace(

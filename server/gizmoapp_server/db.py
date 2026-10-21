@@ -97,7 +97,175 @@ ALTER TABLE debate_sessions
 ALTER TABLE debate_sessions
     ADD COLUMN pending_user_messages_json TEXT NOT NULL DEFAULT '[]';
 """,
+    7: """
+CREATE TABLE account_users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE account_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX account_sessions_user ON account_sessions(user_id);
+CREATE TABLE account_challenges (
+    id TEXT PRIMARY KEY,
+    purpose TEXT NOT NULL,
+    email TEXT NOT NULL,
+    user_id TEXT REFERENCES account_users(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE account_rate_limits (
+    bucket TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+""",
+    8: """
+ALTER TABLE debate_sessions ADD COLUMN draft_attachments_json TEXT NOT NULL DEFAULT '[]';
+CREATE TABLE debate_attachments (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    original BLOB NOT NULL,
+    preview BLOB,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    text_status TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX debate_attachments_owner ON debate_attachments(owner_id);
+CREATE TABLE debate_attachment_links (
+    attachment_id TEXT NOT NULL REFERENCES debate_attachments(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    PRIMARY KEY (attachment_id, session_id)
+);
+""",
+    9: """
+CREATE TABLE account_wallets (
+    user_id TEXT PRIMARY KEY REFERENCES account_users(id) ON DELETE CASCADE,
+    invite_code TEXT NOT NULL UNIQUE,
+    balance INTEGER NOT NULL CHECK (balance >= 0),
+    spent INTEGER NOT NULL DEFAULT 0 CHECK (spent >= 0)
+);
+CREATE TABLE account_referrals (
+    invitee_id TEXT PRIMARY KEY REFERENCES account_users(id) ON DELETE CASCADE,
+    inviter_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    reward INTEGER NOT NULL CHECK (reward > 0),
+    created_at INTEGER NOT NULL,
+    CHECK (invitee_id != inviter_id)
+);
+CREATE TABLE account_usage_entries (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    delta INTEGER NOT NULL,
+    reference TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (user_id, kind, reference)
+);
+CREATE INDEX account_usage_user ON account_usage_entries(user_id, created_at);
+CREATE TABLE account_reply_reservations (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'refunded')),
+    created_at INTEGER NOT NULL
+);
+""",
+    10: """
+ALTER TABLE account_users ADD COLUMN avatar_color TEXT NOT NULL DEFAULT '#4667a5';
+""",
+    11: """
+CREATE TABLE account_email_invites (
+    id TEXT PRIMARY KEY,
+    inviter_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('sending','pending','failed','accepted')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    invitee_id TEXT REFERENCES account_users(id) ON DELETE SET NULL,
+    UNIQUE (inviter_id,email)
+);
+CREATE INDEX account_email_invites_owner ON account_email_invites(inviter_id,created_at);
+""",
+    12: """
+CREATE TABLE debate_web_sources (
+    session_id TEXT NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    request_scope TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, source_id),
+    UNIQUE (session_id, url)
+);
+CREATE INDEX debate_web_sources_recent ON debate_web_sources(session_id, fetched_at DESC);
+""",
 }
+SCHEMA_MIGRATIONS[13] = """
+ALTER TABLE debate_sessions ADD COLUMN owner_id TEXT REFERENCES account_users(id);
+ALTER TABLE debate_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE debate_sessions ADD COLUMN share_hash TEXT;
+ALTER TABLE debate_sessions ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE debate_discussions ADD COLUMN owner_id TEXT REFERENCES account_users(id);
+ALTER TABLE account_reply_reservations ADD COLUMN session_id TEXT;
+CREATE UNIQUE INDEX account_session_reply_pending ON account_reply_reservations(session_id) WHERE state='pending' AND session_id IS NOT NULL;
+CREATE INDEX debate_sessions_owner ON debate_sessions(owner_id, created_at DESC, id);
+CREATE TABLE debate_legacy_imports (
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    legacy_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    PRIMARY KEY(user_id, legacy_id)
+);
+CREATE TABLE debate_session_summaries (
+    session_id TEXT PRIMARY KEY REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    source_revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE account_credit_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','approved','declined')),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+);
+CREATE TABLE account_admins (
+    user_id TEXT PRIMARY KEY REFERENCES account_users(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX account_credit_request_pending ON account_credit_requests(user_id) WHERE state='pending';
+CREATE TABLE debate_feedback (
+    session_id TEXT NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    helpful INTEGER NOT NULL CHECK(helpful IN (0,1)),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(session_id,user_id)
+);
+"""
+SCHEMA_MIGRATIONS[14] = "ALTER TABLE debate_sessions ADD COLUMN legacy_disabled INTEGER NOT NULL DEFAULT 0;"
+SCHEMA_MIGRATIONS[15] = """
+CREATE TABLE debate_reply_commits (
+    reservation_id TEXT PRIMARY KEY REFERENCES account_reply_reservations(id),
+    session_id TEXT NOT NULL REFERENCES debate_sessions(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    message_index INTEGER NOT NULL,
+    message_json TEXT NOT NULL,
+    UNIQUE(session_id, revision)
+);
+CREATE INDEX debate_attachments_created ON debate_attachments(created_at);
+"""
 LATEST_SCHEMA_VERSION = max(SCHEMA_MIGRATIONS)
 BUSY_TIMEOUT_MS = 10_000
 WRITE_RETRY_DELAYS = (0.05, 0.15, 0.35)
