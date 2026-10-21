@@ -1,9 +1,12 @@
-# B6-Debate_Agora-AI_100
 # Debate Agora
 
 Debate Agora lets users ask questions and watch AI participants discuss them from different viewpoints, challenge each other's ideas, and suggest possible answers.
 
-**Course:** AI 100 | **Team:** Guolin, Matthew, Oliver |
+**[Visit the website](https://debate-agora.beringtech.com/)** · **[Open Debate Agora](https://debate-agora.beringtech.com/app)**
+
+**Course:** AI 100 | **Team:** Guolin, Matthew, Oliver
+
+The live application runs on AWS Lightsail behind Nginx and Cloudflare, with HTTPS, streamed replies, verified email accounts, and persistent conversations. New accounts start with 50 AI replies; an eligible invitation adds 100 replies to each person after the new user verifies their email. See the [production deployment notes](docs/deployment.md) for configuration and maintenance.
 
 ## The Problem
 
@@ -48,7 +51,7 @@ Guests see a Log in action and no Recent list. Authentication is required for gr
 
 Signed-in accounts have Invite friends and Usage controls. Each completed live AI reply consumes one allowance; failed, interrupted, and empty replies are refunded. Group setup and summaries are included. New accounts receive 50 replies by default (`GIZMO_ACCOUNT_STARTER_REPLIES`). A valid invitation grants **100 extra replies to each person** only when a new invitee verifies their email (`GIZMO_ACCOUNT_INVITE_REWARD`). Existing accounts, self-invitations, and replayed verifications earn no extra reward. Rewards, balances, and usage entries are server-side; transactional reservations prevent parallel requests from overspending. Database migration 9 adds the allowance ledger and referrals. The legacy analysis runner’s public run/continue routes are retired (410); saved discussions and exports remain available. All current agent generation uses the live-reply allowance meter.
 
-The invitation dialog sends to up to five comma-separated email addresses through Resend. Set `GIZMOAPP_PUBLIC_URL` to the public origin (for example `https://your-domain.com`, without an application path); the configured URL prefix is appended automatically. On a public deployment the request origin is used if this setting is omitted. Local/private origins are rejected for outgoing invitations. Migration 11 stores pending, failed, and accepted invitations; retrying a failed delivery preserves its provider idempotency key and payload. Only the inviter can view their delivery records. Already-registered addresses are skipped before delivery, including on retries; mixed batches report those addresses while sending to eligible new recipients. Sending an email never grants usage; the existing verified registration transaction grants the reward once.
+The invitation dialog sends to up to five comma-separated email addresses through Resend. The live site uses `GIZMOAPP_PUBLIC_URL=https://debate-agora.beringtech.com`; for a separate deployment, use its own public origin without an application path. The configured URL prefix is appended automatically. On a public deployment the request origin is used if this setting is omitted. Local/private origins are rejected for outgoing invitations. Migration 11 stores pending, failed, and accepted invitations; retrying a failed delivery preserves its provider idempotency key and payload. Only the inviter can view their delivery records. Already-registered addresses are skipped before delivery, including on retries; mixed batches report those addresses while sending to eligible new recipients. Sending an email never grants usage; the existing verified registration transaction grants the reward once.
 
 Account emails share the table-based templates in `server/gizmoapp_server/templates/emails/`: registration, email-change verification, password reset, and invitations. The black transparent wordmark and selected blue banner are embedded as CID PNG/JPEG attachments, with a solid blue header fallback and an Outlook VML background; essential styles are inline and small-screen adjustments are in the email stylesheet. Primary buttons retain the app’s brand blue, `#246cf6`. All messages include a plain-text alternative. Verification codes remain contiguous for copying, and invitation buttons preserve the referral URL, with a visible fallback link. Existing outbox payloads remain immutable for idempotent retries; newly created invitations use the current template. Run `.venv/bin/python scripts/preview_account_emails.py` to regenerate the safe sample HTML files in `design/emails/`; the sample code and referral are not live credentials, and this command never sends email. Preview HTML uses embedded data images solely for browser inspection. Implementation references: [Resend inline images](https://resend.com/docs/dashboard/emails/embed-inline-images) and [Gmail CSS support](https://developers.google.com/workspace/gmail/design/css).
 
@@ -91,7 +94,7 @@ Open `http://127.0.0.1:8001/`. The installer creates the Python environment and 
 
 Run `make validate` before release. It checks JavaScript with Node's parser, runs the Python suite against temporary databases and mocked providers, and runs the frontend behavioral suite. Two historical external-tool checks skip explicitly when their optional fixtures are absent.
 
-The production installer uses `deploy/gunicorn.conf.py`: one threaded worker by default, with time for streaming requests to finish during reloads. Configure a persistent secret, production cookies, model/email credentials and the public URL on the server. Run the database migration command before starting with automatic migration disabled; migration 15 adds durable reply commits. Keep database backups outside Git. Enable proxy trust only behind the trusted reverse proxy. Uploading this repository does not itself configure or start a production host.
+The production service uses `deploy/gunicorn.conf.py`: one threaded worker by default, with time for streaming requests to finish during reloads. Configure a persistent secret, production cookies, model/email credentials and the public URL on the server. Run the database migration command before starting with automatic migration disabled; migration 15 adds durable reply commits. Keep database backups outside Git. Enable proxy trust only behind the trusted reverse proxy. The live site is deployed separately from GitHub; pushing a commit does not automatically deploy it. See [production deployment notes](docs/deployment.md).
 
 ## Limitations and Responsible Use
 
