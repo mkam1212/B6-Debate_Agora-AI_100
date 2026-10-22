@@ -202,11 +202,12 @@ class AccountTests(unittest.TestCase):
         self.assertFalse(self.sql("SELECT * FROM account_challenges"))
 
     def test_guests_cannot_start_or_request_ai(self):
-        with patch("server.gizmoapp_server.debate_api.generate_participant_roles") as model:
-            for endpoint in ("roles/generate", "sessions", "sessions/" + "a" * 32 + "/reply", "sessions/" + "a" * 32 + "/summary", "discussions/example/run"):
+        with patch("server.gizmoapp_server.debate_api.generate_participant_roles") as model, patch("server.gizmoapp_server.debate_api.generate_participant_role") as one_model:
+            for endpoint in ("roles/generate", "roles/generate-one", "sessions", "sessions/" + "a" * 32 + "/reply", "sessions/" + "a" * 32 + "/summary", "discussions/example/run"):
                 response = self.client.post("/agora/api/debate/" + endpoint, json={})
                 self.assertEqual(response.status_code, 401, endpoint)
             model.assert_not_called()
+            one_model.assert_not_called()
         self.assertEqual(self.client.get("/agora/api/account/usage").status_code, 401)
 
     def test_invitation_rewards_both_only_after_verified_new_registration(self):

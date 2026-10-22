@@ -3,6 +3,7 @@ import { createAccount } from "./account.js?v=delivery-80";
 import { collectSources, trustedCitations } from "./sources.js?v=web-75";
 import { createAttachments } from "./attachments.js?v=delivery-80";
 import { isDialogBackdropClick, updateRecentHistory } from "./interaction-utils.js?v=nav-73";
+import { AGENT_TEMPLATES, templateAgent, generatedAgent } from "./agent-templates.js?v=templates-81";
 
 const HISTORY_KEY = "agora-session-history-v1";
 const PROFILE_KEY = "agora-local-profile-v1";
@@ -20,7 +21,7 @@ const STARTERS = [
   ["rocket", "Should we launch early or wait for a more polished product?"],
 ];
 
-export function createWorkspace({ basePath, appPath, getState, beforeNavigate, beforeSignOut, sessionEnded, usageChanged, useQuestion, attachmentsChanged, saveAgent, removeAgent, refresh }) {
+export function createWorkspace({ basePath, appPath, getState, beforeNavigate, beforeSignOut, sessionEnded, usageChanged, useQuestion, attachmentsChanged, saveAgent, removeAgent, generateAgent, refresh }) {
   const sidebar = document.getElementById("workspace-sidebar");
   const dialog = document.getElementById("workspace-dialog");
   const toast = document.getElementById("workspace-toast");
@@ -242,6 +243,7 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     if (!role) return;
     const index = add ? state.roles.length : state.roles.indexOf(role);
     open(add ? "Add agent" : "Edit agent", `<form data-workspace-form="agent" data-role-id="${add ? "" : esc(role.id)}">
+      ${add ? `<div class="agent-templates" role="group" aria-label="Start from a template"><span class="agent-templates-label">Start from a template</span><div class="agent-template-list">${AGENT_TEMPLATES.map(template => `<button type="button" class="agent-template" data-workspace="agent-template" data-template-id="${esc(template.id)}" title="${esc(template.prompt)}">${esc(template.identity)}</button>`).join("")}</div></div>` : ""}
       <div class="agent-editor-identity"><span data-avatar-preview>${avatar({ ...role, name: role.name || "+" }, index)}</span><div><strong>${add ? "A new perspective" : esc(agentName(role))}</strong><span>${add ? "Give this agent a point of view." : esc(role.identity || "Debate participant")}</span></div></div>
       <label class="field">Name<input name="name" value="${esc(role.name)}" maxlength="48" placeholder="e.g. Maya" required autocomplete="off"></label>
       <label class="field">Perspective<input name="identity" value="${esc(role.identity || "")}" maxlength="96" placeholder="e.g. Optimist"></label>
@@ -354,6 +356,27 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       setDrawer(activeDrawer() === "details" ? "" : "details");
     }
     else if (action === "close-drawers") setDrawer();
+    else if (action === "agent-template") {
+      const template = AGENT_TEMPLATES.find(item => item.id === button.dataset.templateId);
+      const form = dialog.querySelector('[data-workspace-form="agent"]');
+      if (!template || !form || form.dataset.templateBusy) return;
+      const state = getState();
+      const chips = [...form.querySelectorAll("[data-workspace=agent-template]")];
+      const error = form.querySelector("[data-agent-error]");
+      form.dataset.templateBusy = "true"; error.hidden = true;
+      for (const chip of chips) { chip.disabled = true; chip.setAttribute("aria-pressed", String(chip === button)); }
+      button.setAttribute("aria-busy", "true");
+      let values = null;
+      try { values = generatedAgent(await generateAgent(template.roleType)); } catch { values = null; }
+      if (!form.isConnected) return;
+      if (!values) { values = template; error.textContent = "Couldn’t tailor this agent to your question, so the standard template was used."; error.hidden = false; }
+      values = templateAgent(values, state.roles.map(role => role.name));
+      for (const [field, value] of Object.entries(values)) form.elements[field].value = value;
+      syncAvatarColorPreview(form);
+      delete form.dataset.templateBusy; button.removeAttribute("aria-busy");
+      for (const chip of chips) chip.disabled = false;
+      form.elements.name.focus({ preventScroll: true });
+    }
     else if (action === "starter") {
       const starter = STARTERS[Number(button.dataset.index)];
       if (starter && await useQuestion(starter[1]) && dialog.open) dialog.close();

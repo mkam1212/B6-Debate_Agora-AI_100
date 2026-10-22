@@ -45,8 +45,10 @@ from .debate_roles import (
     MAX_ROLE_IDENTITY_LENGTH,
     MAX_ROLE_NAME_LENGTH,
     MAX_ROLE_QUESTION_LENGTH,
+    ROLE_TYPES,
     RoleGenerationOutputError,
     RoleGenerationUnavailable,
+    generate_role as generate_participant_role,
     generate_roles as generate_participant_roles,
 )
 from .debate_chat import (
@@ -815,6 +817,34 @@ def register_debate_routes(app: Flask) -> None:
                 diagnostics=getattr(exc, "role_generation_diagnostics", None),
             )
         return jsonify({"roles": roles})
+
+    @app.post(scoped_path(prefix, "api/debate/roles/generate-one"))
+    def generate_one_role():
+        _require_user()
+        payload, error = _json_payload()
+        if error:
+            return error
+        try:
+            question = _string(payload, "question", MAX_ROLE_QUESTION_LENGTH, required=True)
+            avoid_names = _avoid_names(payload)
+            role_type = _string(payload, "roleType", 32, required=True)
+            if role_type not in ROLE_TYPES:
+                raise ValueError("roleType must use a supported value")
+        except ValueError as exc:
+            return _error(str(exc))
+        try:
+            role = generate_participant_role(question, role_type, avoid_names)
+        except RoleGenerationUnavailable as exc:
+            return _error(str(exc), 503)
+        except RoleGenerationOutputError as exc:
+            return _error(str(exc), 502, diagnostics=exc.diagnostics)
+        except llm.CourseLLMError as exc:
+            return _error(
+                f"AI role generation is unavailable. {exc}",
+                503,
+                diagnostics=getattr(exc, "role_generation_diagnostics", None),
+            )
+        return jsonify({"role": role})
 
     @app.get(scoped_path(prefix, "api/debate/status"))
     def debate_status():

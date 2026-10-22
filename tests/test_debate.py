@@ -645,6 +645,51 @@ class AgentDebateApiTests(unittest.TestCase):
         self.assertNotIn("Use the language of the user's question", messages[0]["content"])
         self.assertIn(json.dumps(context, ensure_ascii=False, separators=(",", ":")), messages[1]["content"])
 
+    def test_single_role_generation_returns_one_role_of_the_requested_type(self):
+        temp_dir, app = make_app("/agent-debate")
+        question = "Should public transit be free?"
+        role = {
+            "name": "Priya",
+            "identity": "Daily transit rider",
+            "roleType": "Skeptic",
+            "prompt": "Looks for service gaps that fares alone would not fix. Asks who is left out and what evidence is missing.",
+            "avatarSeed": 5,
+        }
+        try:
+            client = authenticated_client(app)
+            with (
+                patch("server.gizmoapp_server.debate_roles.llm.is_configured", return_value=True),
+                patch(
+                    "server.gizmoapp_server.debate_roles.llm.chat",
+                    return_value=json.dumps({"roles": [role]}),
+                ) as model_chat,
+            ):
+                response = client.post(
+                    "/agent-debate/api/debate/roles/generate-one",
+                    json={"question": question, "roleType": "Skeptic", "avoidNames": ["Avery"]},
+                )
+                invalid = client.post(
+                    "/agent-debate/api/debate/roles/generate-one",
+                    json={"question": question, "roleType": "Wizard"},
+                )
+                wrong_type = client.post(
+                    "/agent-debate/api/debate/roles/generate-one",
+                    json={"question": question, "roleType": "Builder"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            generated = response.get_json()["role"]
+            self.assertEqual(set(generated), {"id", "name", "identity", "roleType", "prompt", "avatarSeed"})
+            self.assertEqual(len(generated["id"]), 32)
+            self.assertEqual(generated["roleType"], "Skeptic")
+            first_input = json.loads(model_chat.call_args_list[0].args[0][1]["content"].split("\n", 1)[1])
+            self.assertEqual(first_input, {"discussionQuestion": question, "roleType": "Skeptic", "avoidNames": ["Avery"]})
+            self.assertEqual(invalid.status_code, 400)
+            # The model answered with a Skeptic for a Builder request, twice (initial attempt and repair).
+            self.assertEqual(wrong_type.status_code, 502)
+        finally:
+            temp_dir.cleanup()
+
     def test_role_generation_repairs_missing_identity_and_returns_concrete_person_fields(self):
         malformed_payload = json.loads(generated_roles_response())
         del malformed_payload["roles"][1]["identity"]
@@ -4285,6 +4330,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
             )
         )
         self.assertIn("return `${apiBase()}/debate/roles/generate`;", self.debate_js)
+        self.assertIn("return `${apiBase()}/debate/roles/generate-one`;", self.debate_js)
         self.assertIn("requestJson(\n        roleGenerationApi(),", self.debate_js)
         self.assertIn("question: question.trim(),", self.debate_js)
         self.assertIn("...(avoidNames.length ? { avoidNames } : {})", self.debate_js)

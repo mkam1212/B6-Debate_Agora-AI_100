@@ -424,6 +424,12 @@ body[data-debate-stage="participants"] .is-setup .main-column { max-width: none;
 .share-link-field .icon-button { width:28px; height:28px; }
 .agent-dialog { width: min(464px, calc(100vw - 32px)); padding: 24px; }
 .agent-dialog form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.agent-templates { grid-column: 1 / -1; display: grid; gap: 8px; margin-bottom: 18px; }
+.agent-templates-label { font-size: 12px; color: var(--muted); }
+.agent-template-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-template { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: #3b4149; background: transparent; transition: color .15s, background-color .15s, border-color .15s; }
+.agent-template:hover, .agent-template:focus-visible { background: #f0efeb; }
+.agent-template[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .agent-editor-identity { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 0 0 22px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
 .agent-editor-identity .initial-avatar { width: 28px; height: 28px; font-size: 12px; }
 .agent-editor-identity > div { display: grid; grid-template-columns: minmax(0,1fr); flex: 1; min-width: 0; gap: 3px; }

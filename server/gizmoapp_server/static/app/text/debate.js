@@ -1,7 +1,7 @@
 import { consumeStartIntent, rememberStartIntent } from "./start-flow.js?v=allowance-78";
 import { requestEventStream, requestJson } from "../api.js?v=flow-77";
 import { icon, initials, agentName, avatar, avatarStyle, avatarColorPicker, randomAvatarColor, isAvatarColor } from "./ui.js?v=allowance-78";
-import { createWorkspace } from "./workspace.js?v=delivery-80";
+import { createWorkspace } from "./workspace.js?v=templates-81";
 import { renderSummaryCopy } from "./summary-view.js?v=allowance-78";
 import { trustedCitations, renderCitedText, streamingText } from "./sources.js?v=web-75";
 import { isDialogBackdropClick, mentionAtCaret, mentionedRole, insertRoleMention, discussionTurnDelay, CONVERSATION_STYLES, withConversationStyle } from "./interaction-utils.js?v=nav-73";
@@ -270,6 +270,10 @@ function sessionSummaryApi(sessionId) {
 
 function roleGenerationApi() {
   return `${apiBase()}/debate/roles/generate`;
+}
+
+function singleRoleGenerationApi() {
+  return `${apiBase()}/debate/roles/generate-one`;
 }
 
 function recentGeneratedNames() {
@@ -2226,6 +2230,16 @@ async function saveAgent(roleId, values) {
   if (state.sessionId && !await saveSessionNow()) workspace.notify("Your edits are kept in this tab; the server could not save them yet.");
   return true;
 }
+async function generateAgent(roleType) {
+  const question = state.question.trim();
+  if (!question) return null;
+  const avoidNames = state.roles.map(role => role.name).slice(-MAX_RECENT_GENERATED_NAMES);
+  const response = await requestJson(
+    singleRoleGenerationApi(),
+    jsonOptions("POST", { question, roleType, ...(avoidNames.length ? { avoidNames } : {}) }, ROLE_GENERATION_TIMEOUT_MS),
+  );
+  return response?.role ?? null;
+}
 async function removeAgent(roleId) {
   if (state.replyPending || state.roles.length <= 1) return false;
   if (!state.roles.some(role => role.id === roleId)) return false;
@@ -2344,6 +2358,7 @@ const workspace = createWorkspace({
   },
   saveAgent,
   removeAgent,
+  generateAgent,
   useQuestion: async (question) => {
     if (state.sessionId) {
       if (!await prepareNavigation()) return false;
