@@ -1,6 +1,6 @@
 # Debate Agora
 
-Debate Agora lets users ask questions and watch AI participants discuss them from different viewpoints, challenge each other's ideas, and suggest possible answers.
+Debate Agora lets users ask questions and watch AI participants debate them from different viewpoints, challenge each other's ideas, and suggest possible answers.
 
 **[Visit the website](https://debate-agora.beringtech.com/)** · **[Open Debate Agora](https://debate-agora.beringtech.com/app)**
 
