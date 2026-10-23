@@ -24,7 +24,8 @@ class AgentToolsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app = create_app({'TESTING': True, 'AUTO_MIGRATE': True, 'DB_PATH': Path(self.tmp.name)/'test.sqlite3',
-            'SECRET_KEY': 'tools-test', 'WEB_SEARCH_ENABLED': True, 'GIZMO_LLM_BASE_URL': 'https://api.openai.com/v1', 'GIZMO_LLM_API_KEY': 'test-key'}, shell_variant='text')
+            'SECRET_KEY': 'tools-test', 'WEB_SEARCH_ENABLED': True, 'GIZMO_LLM_BASE_URL': 'https://api.openai.com/v1',
+            'GIZMO_LLM_API_KEY': 'test-key', 'GIZMO_LLM_MODEL': 'test-model'}, shell_variant='text')
         self.ctx = self.app.app_context(); self.ctx.push()
         self.role = {'id': 'role-1', 'name': 'Grace', 'identity': 'Evidence analyst', 'avatar': 'G', 'roleType': 'Analyst', 'prompt': 'Test the last claim.'}
         self.snapshot = {'question': 'Search official documentation for function calling.', 'participants': [self.role], 'messages': [], 'pendingUserMessages': [], 'draft': '', 'draftAttachments': [], 'paused': False, 'debateStarted': True}

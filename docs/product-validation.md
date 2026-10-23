@@ -68,3 +68,4 @@ A synthetic transcript cannot establish that real people make better decisions o
 - Desktop and mobile checks covered long folder names, compact selection pills, interrupted expand/collapse animations, reduced motion, narrower drawers and a bounded folder control in the composer. Mention selection uses the established solid blue treatment.
 - Release validation passed: 323 Python tests ran with two explicit skips for unavailable optional historical tools/fixtures; all 75 frontend tests passed. Tests use temporary databases and mocked providers, without real-user credits or email delivery.
 - Database migration 16 adds private folders and nullable conversation membership. Its regression test upgrades a version-15 database while preserving existing conversation drafts.
+- Web-tool tests explicitly select a mocked model, retaining the production checkout's test-isolation fix without depending on local provider configuration.
