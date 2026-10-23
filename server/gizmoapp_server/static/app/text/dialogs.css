@@ -24,7 +24,7 @@
 .composer-shell .mention-menu button { box-sizing: border-box; height: 44px; min-height: 44px; padding: 8px 10px; transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease; }
 .mention-menu button > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mention-menu button:hover { background: #ffffff66; }
-.mention-menu button[aria-selected="true"] { color: #315fa6; background: linear-gradient(135deg, #ffffffb8, #dbe7ff70); box-shadow: inset 0 0 0 1px #ffffffb3, 0 2px 6px #4d70a50b; }
+.mention-menu button[aria-selected="true"] { color: #326cce; background: #eaf0fc; box-shadow: none; }
 .mention-menu:not([hidden]) { animation: mention-appear 120ms ease-out; }
 @keyframes mention-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @media (prefers-reduced-motion: reduce) { .mention-menu:not([hidden]) { animation: none; } }

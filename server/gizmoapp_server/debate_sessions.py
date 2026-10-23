@@ -46,6 +46,7 @@ def _session_payload(row: sqlite3.Row) -> dict[str, Any]:
         "updatedAt": row["updated_at"],
         "ownerId": row["owner_id"],
         "archived": bool(row["archived"]),
+        "folderId": row["folder_id"],
     }
 
 
@@ -57,16 +58,21 @@ def fetch_session(connection: sqlite3.Connection, session_id: str) -> dict[str, 
     return _session_payload(row) if row is not None else None
 
 
-def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any], owner_id: str | None = None, *, commit=True) -> dict[str, Any]:
+def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any], owner_id: str | None = None, *, commit=True, folder_id=None) -> dict[str, Any]:
     session_id = uuid.uuid4().hex
     now = _now()
     with WRITE_LOCK:
+        if folder_id is not None:
+            if commit:
+                connection.execute("BEGIN IMMEDIATE")
+            from .session_folders import require_folder
+            require_folder(connection, folder_id, owner_id)
         connection.execute(
             """
             INSERT INTO debate_sessions (
                 id, question, participants_json, messages_json, pending_user_messages_json, draft,
-                debate_started, paused, created_at, updated_at, draft_attachments_json, owner_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                debate_started, paused, created_at, updated_at, draft_attachments_json, owner_id, folder_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -81,6 +87,7 @@ def create_session(connection: sqlite3.Connection, snapshot: dict[str, Any], own
                 now,
                 _dump(snapshot.get("draftAttachments", [])),
                 owner_id,
+                folder_id,
             ),
         )
         if commit:

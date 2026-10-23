@@ -3,7 +3,8 @@ import { createAccount } from "./account.js?v=delivery-80";
 import { collectSources, trustedCitations } from "./sources.js?v=web-75";
 import { createAttachments } from "./attachments.js?v=delivery-80";
 import { isDialogBackdropClick, updateRecentHistory } from "./interaction-utils.js?v=nav-73";
-import { AGENT_TEMPLATES, templateAgent, generatedAgent } from "./agent-templates.js?v=templates-81";
+import { AGENT_TEMPLATES, createAgentTemplateDraft } from "./agent-templates.js?v=agent-editor-82";
+import { createFolders, captureFolderPanels, animateFolderPanels } from "./folders.js?v=folder-motion-88";
 
 const HISTORY_KEY = "agora-session-history-v1";
 const PROFILE_KEY = "agora-local-profile-v1";
@@ -21,7 +22,7 @@ const STARTERS = [
   ["rocket", "Should we launch early or wait for a more polished product?"],
 ];
 
-export function createWorkspace({ basePath, appPath, getState, beforeNavigate, beforeSignOut, sessionEnded, usageChanged, useQuestion, attachmentsChanged, saveAgent, removeAgent, generateAgent, refresh }) {
+export function createWorkspace({ basePath, appPath, getState, beforeNavigate, navigateApp, routeChanged, beforeSignOut, sessionEnded, usageChanged, useQuestion, attachmentsChanged, saveAgent, removeAgent, generateAgent, refresh }) {
   const sidebar = document.getElementById("workspace-sidebar");
   const dialog = document.getElementById("workspace-dialog");
   const toast = document.getElementById("workspace-toast");
@@ -44,8 +45,10 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
   let searchOffset = 0;
   let searchHasMore = false;
   let dialogTrigger;
+  let agentEditor = null;
   let popoverTrigger;
   let dismissedByTrigger = null;
+  let sidebarMarkup = "";
   const mobileSidebar = window.matchMedia("(max-width: 719px)");
   const mobileDetails = window.matchMedia("(max-width: 1099px)");
   function activeDrawer() {
@@ -75,8 +78,19 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
   });
   const account = createAccount({
     basePath, open, dialog, notify, changed: refresh, beforeSignOut, usageChanged,
-    afterSignOut: () => { historyItems = []; closePopover(); dialog.close(); sessionEnded?.(); refresh(); window.location.replace(appPath); },
+    afterSignOut: () => { historyItems = []; folders.reset(); closePopover(); dialog.close(); sessionEnded?.(); refresh(); window.location.replace(appPath); },
   });
+  const folders = createFolders({ basePath, appPath, getUser: account.user, getState, open, dialog, notify, showPopover, closePopover, navigate: path => navigate(path, { force: true }), changed: refreshFolders });
+  function refreshFolders() {
+    renderSidebar();
+    const chip = document.querySelector(".composer-folder");
+    if (chip) {
+      const focused = document.activeElement === chip;
+      chip.outerHTML = folders.chip();
+      if (focused) document.querySelector(".composer-folder")?.focus({ preventScroll: true });
+    }
+    routeChanged?.();
+  }
   const attachments = createAttachments({ basePath, getState, notify, open, dialog, changed: (saveNow = false) => { refresh(); return attachmentsChanged(saveNow); } });
   const currentProfile = () => account.user() || profile;
   const historyKey = () => account.user() ? `${HISTORY_KEY}:${account.user().id}` : HISTORY_KEY;
@@ -125,11 +139,13 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       historyItems = more ? [...historyItems, ...result.sessions] : result.sessions;
       historyItems = [...new Map(historyItems.map(item => [item.id, item])).values()];
       historyHasMore = result.hasMore; historyOffset = result.nextOffset;
+      await folders.load();
       refresh();
     })().catch(() => { historyUserId = ""; }).finally(() => { historyTask = null; });
     return historyTask;
   }
-  function recordSession(saved) {
+  function recordSession(saved, created = false) {
+    folders.observe(saved, created);
     if (saved.archived) { historyItems = historyItems.filter(item => item.id !== saved.id); return; }
     if (saved.access && saved.access !== "owner") return;
     const item = { id: saved.id, question: saved.title || saved.question, started: saved.debateStarted, createdAt: saved.createdAt, updated: saved.updatedAt };
@@ -177,28 +193,51 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     const index = buttons.indexOf(document.activeElement);
     buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length].focus();
   });
-  async function navigate(path) {
+  async function navigate(path, options) {
+    if (navigateApp) {
+      const handled = await navigateApp(path, options);
+      if (handled !== null) {
+        if (handled) {
+          closePopover();
+          if (dialog.open) dialog.close();
+          if (activeDrawer()) setDrawer("", false);
+        }
+        return;
+      }
+    }
     if (!await beforeNavigate()) return;
     closePopover();
     window.location.assign(path);
   }
   function renderSidebar() {
+    const active = sidebar.contains(document.activeElement) ? document.activeElement : null;
+    const focusKey = active ? { action: active.dataset.workspace, folder: active.dataset.folderId, session: active.dataset.sessionId } : null;
+    const scrollTop = sidebar.querySelector(".recent-section")?.scrollTop || 0;
     const state = getState();
     const profile = currentProfile();
     const signedIn = Boolean(account.user());
     const usage = account.usage();
     if (signedIn && historyUserId !== account.user().id && !historyTask) void syncHistory();
-    sidebar.innerHTML = `<div class="drawer-heading sidebar-heading"><a class="brand" href="${esc(basePath)}" data-workspace="home" aria-label="Debate Agora home"><img src="${esc(LOGO_URL)}" alt="Debate Agora" width="2172" height="724"></a><button class="icon-button drawer-close" data-workspace="close-drawers" aria-label="Close sidebar">${icon("close")}</button></div>
+    const markup = `<div class="drawer-heading sidebar-heading"><a class="brand" href="${esc(basePath)}" data-workspace="home" aria-label="Debate Agora home"><img src="${esc(LOGO_URL)}" alt="Debate Agora" width="2172" height="724"></a><button class="icon-button drawer-close" data-workspace="close-drawers" aria-label="Close sidebar">${icon("close")}</button></div>
       <button class="new-debate" data-workspace="new">${icon("plus")}New debate</button>
       ${signedIn ? `<nav class="primary-nav" aria-label="Workspace"><button data-workspace="search">${icon("search")}<span>Search</span><kbd>⌘ K</kbd></button></nav>` : ""}
-      ${signedIn ? `<section class="recent-section" aria-labelledby="recent-title"><h2 id="recent-title">Recent</h2>
-        <nav class="recent-list" aria-label="Recent debates">${history().map(item => `<a class="recent-item${state.sessionId === item.id ? " is-current" : ""}" href="${esc(appPath)}/${item.started ? "debate" : "participants"}?session=${encodeURIComponent(item.id)}" data-workspace="session" ${state.sessionId === item.id ? 'aria-current="page"' : ""} title="${esc(item.question)}"><i class="recent-dot" aria-hidden="true"></i><span>${esc(item.question)}</span></a>`).join("") || '<p class="sidebar-empty">Your debates will appear here.</p>'}${historyHasMore ? '<button class="recent-more" data-workspace="history-more">Show more</button>' : ''}</nav>
-      </section><div class="sidebar-account"><div class="sidebar-benefits">
+      ${signedIn ? `${folders.render()}<div class="sidebar-account"><div class="sidebar-benefits">
         <button data-account="usage" aria-label="Usage: ${usage ? `${usage.remaining} AI replies left` : "loading"}">${icon("usage")}<span>Usage</span><small>${usage ? `${usage.remaining} left` : "…"}</small></button>
         <button data-account="invite">${icon("users")}<span>Invite friends</span></button>
       </div><button class="profile-control" data-workspace="profile-menu" aria-label="Profile: ${esc(profile.name)}" aria-haspopup="menu">${avatar(profile)}<span>${esc(profile.name)}</span>${icon("down")}</button></div>` : `<div class="sidebar-spacer"></div><div class="sidebar-login"><button class="login-button" data-account="sign-in">${icon("login")}<span>Log in</span></button></div>`}`;
+    if (markup === sidebarMarkup) return;
+    sidebarMarkup = markup;
+    const folderPanels = captureFolderPanels(sidebar);
+    sidebar.innerHTML = markup;
+    animateFolderPanels(sidebar, folderPanels, window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    const library = sidebar.querySelector(".recent-section");
+    if (library) library.scrollTop = scrollTop;
+    if (focusKey?.action) [...sidebar.querySelectorAll("[data-workspace]")].find(control =>
+      control.dataset.workspace === focusKey.action && control.dataset.folderId === focusKey.folder && control.dataset.sessionId === focusKey.session)?.focus({ preventScroll: true });
   }
   function open(title, body, className = "") {
+    agentEditor?.draft.dispose();
+    agentEditor = null;
     closePopover();
     dialogTrigger = document.activeElement;
     dialog.className = `workspace-dialog ${className}`;
@@ -208,6 +247,8 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       .find(control => !control.closest("[inert]") && control.getClientRects().length)?.focus({ preventScroll: true });
   }
   dialog.addEventListener("close", () => {
+    agentEditor?.draft.dispose();
+    agentEditor = null;
     if (dialogTrigger?.isConnected) dialogTrigger.focus({ preventScroll: true });
     else document.querySelector("[data-chat-input], [data-field=question]")?.focus({ preventScroll: true });
   });
@@ -243,15 +284,53 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     if (!role) return;
     const index = add ? state.roles.length : state.roles.indexOf(role);
     open(add ? "Add agent" : "Edit agent", `<form data-workspace-form="agent" data-role-id="${add ? "" : esc(role.id)}">
-      ${add ? `<div class="agent-templates" role="group" aria-label="Start from a template"><span class="agent-templates-label">Start from a template</span><div class="agent-template-list">${AGENT_TEMPLATES.map(template => `<button type="button" class="agent-template" data-workspace="agent-template" data-template-id="${esc(template.id)}" title="${esc(template.prompt)}">${esc(template.identity)}</button>`).join("")}</div></div>` : ""}
-      <div class="agent-editor-identity"><span data-avatar-preview>${avatar({ ...role, name: role.name || "+" }, index)}</span><div><strong>${add ? "A new perspective" : esc(agentName(role))}</strong><span>${add ? "Give this agent a point of view." : esc(role.identity || "Debate participant")}</span></div></div>
+      <div class="agent-editor-identity"><span data-avatar-preview>${avatar({ ...role, name: role.name || "+" }, index)}</span><div><strong data-agent-name>${add ? "A new perspective" : esc(agentName(role))}</strong><span data-agent-perspective>${add ? "A fresh voice for this conversation." : esc(role.identity || "Debate participant")}</span></div></div>
+      ${add ? `<div class="agent-templates" role="group" aria-label="Thinking approach"><div class="agent-template-heading"><span class="agent-templates-label">Approach</span><span class="agent-template-status" data-agent-template-status role="status" hidden><span class="agent-template-spinner" aria-hidden="true"></span><span data-agent-template-status-text></span></span></div><div class="agent-template-list">${AGENT_TEMPLATES.map(template => `<button type="button" class="agent-template" data-workspace="agent-template" data-template-id="${esc(template.id)}" aria-pressed="false" title="${esc(template.description)}">${esc(template.identity)}</button>`).join("")}</div><p class="agent-template-description" data-agent-template-description>Choose an approach, or write your own.</p></div>` : ""}
       <label class="field">Name<input name="name" value="${esc(role.name)}" maxlength="48" placeholder="e.g. Maya" required autocomplete="off"></label>
       <label class="field">Perspective<input name="identity" value="${esc(role.identity || "")}" maxlength="96" placeholder="e.g. Optimist"></label>
       ${avatarColorPicker(role, index, { preview: false })}
-      <label class="field">Personality<textarea name="prompt" rows="6" maxlength="1000" placeholder="How should this agent think and contribute?" required>${esc(role.prompt)}</textarea><span class="field-help">Describe their approach, expertise, or tone.</span></label>
+      <label class="field">Personality<textarea name="prompt" rows="4" maxlength="1000" placeholder="How should this agent think and contribute?" required>${esc(role.prompt)}</textarea></label>
       <p class="form-error" data-agent-error role="alert" hidden></p>
       <div class="dialog-actions">${!add ? `<button type="button" class="icon-button remove-agent-button" data-workspace="delete-agent" data-role-id="${esc(role.id)}" aria-label="Remove agent" title="Remove agent" ${state.roles.length <= 1 ? "disabled" : ""}>${icon("trash")}</button>` : ""}<span class="action-spacer"></span><button type="button" class="button button-secondary" data-workspace="close">Cancel</button><button type="submit" class="button button-primary">${add ? "Add agent" : "Save changes"}</button></div>
-    </form>`, "agent-dialog");
+    </form>`, "polished-dialog agent-dialog");
+    const form = dialog.querySelector('[data-workspace-form="agent"]');
+    form.dataset.roleType = role.roleType || "Analyst";
+    const draft = createAgentTemplateDraft({
+      roleType: form.dataset.roleType,
+      generate: generateAgent,
+      existingNames: () => getState().roles.map(item => item.name),
+      readFields: () => Object.fromEntries(["name", "identity", "prompt"].map(field => [field, form.elements[field].value])),
+      applyFields: values => {
+        for (const [field, value] of Object.entries(values)) form.elements[field].value = value;
+        syncAgentPreview(form);
+      },
+      changed: next => {
+        if (!dialog.open || !form.isConnected) return;
+        form.dataset.roleType = next.roleType;
+        if (next.busy) form.dataset.templateBusy = "true";
+        else delete form.dataset.templateBusy;
+        form.querySelector('[type="submit"]').disabled = next.busy;
+        const group = form.querySelector(".agent-templates");
+        group?.setAttribute("aria-busy", String(next.busy));
+        for (const chip of form.querySelectorAll('[data-workspace="agent-template"]')) {
+          chip.disabled = next.busy;
+          chip.setAttribute("aria-pressed", String(chip.dataset.templateId === next.selectedId));
+        }
+        const status = form.querySelector("[data-agent-template-status]");
+        if (status) {
+          status.hidden = !next.busy;
+          status.querySelector("[data-agent-template-status-text]").textContent = next.status;
+          form.querySelector("[data-agent-template-description]").textContent = next.description;
+        }
+      },
+    });
+    agentEditor = { form, draft };
+  }
+  function syncAgentPreview(form) {
+    if (!form) return;
+    syncAvatarColorPreview(form);
+    form.querySelector("[data-agent-name]").textContent = form.elements.name.value.trim() || "A new perspective";
+    form.querySelector("[data-agent-perspective]").textContent = form.elements.identity.value.trim() || "A fresh voice for this conversation.";
   }
   function showSources() {
     const items = sources();
@@ -274,7 +353,7 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
   }
   function showManage() {
     const state = getState();
-    open("Manage debate", `<form data-workspace-form="rename"><label class="field">Title<input name="question" maxlength="2000" required value="${esc(state.title || state.question)}"></label><div class="dialog-actions"><button class="dialog-primary" type="submit">Save title</button></div></form><div class="manage-actions"><button class="dialog-text-button" data-workspace="archive">${state.archived ? 'Restore to Recent' : 'Archive debate'}</button><button class="dialog-text-button destructive" data-workspace="confirm-delete">Delete debate</button></div>`, "polished-dialog manage-dialog");
+    open("Manage debate", `<form data-workspace-form="rename"><label class="field">Title<input name="question" maxlength="2000" required value="${esc(state.title || state.question)}"></label><div class="dialog-actions"><button class="dialog-primary" type="submit">Save title</button></div></form><div class="manage-actions"><button class="dialog-text-button" data-workspace="folder-move-current">Move to folder</button><button class="dialog-text-button" data-workspace="archive">${state.archived ? 'Restore to Recent' : 'Archive debate'}</button><button class="dialog-text-button destructive" data-workspace="confirm-delete">Delete debate</button></div>`, "polished-dialog manage-dialog");
   }
   function exportTranscript() {
     const state = getState();
@@ -292,10 +371,13 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     if (accountButton && !accountButton.disabled) { event.preventDefault(); closePopover(); await account.handleAction(accountButton); return; }
     const button = event.target.closest("[data-workspace]");
     if (!button || button.disabled) return;
+    if (button.dataset.workspace === "session" && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button > 0)) return;
     event.preventDefault();
     const action = button.dataset.workspace;
+    if (action === "folder-move-current") { folders.moveCurrent(); return; }
+    if (await folders.handleAction(button)) return;
     if (action === "home") await navigate(basePath);
-    else if (action === "new") await navigate(appPath);
+    else if (action === "new") await navigate(appPath, { force: true });
     else if (action === "session") await navigate(button.href);
     else if (action === "search") showSearch();
     else if (action === "sources") showSources();
@@ -358,24 +440,9 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     else if (action === "close-drawers") setDrawer();
     else if (action === "agent-template") {
       const template = AGENT_TEMPLATES.find(item => item.id === button.dataset.templateId);
-      const form = dialog.querySelector('[data-workspace-form="agent"]');
-      if (!template || !form || form.dataset.templateBusy) return;
-      const state = getState();
-      const chips = [...form.querySelectorAll("[data-workspace=agent-template]")];
-      const error = form.querySelector("[data-agent-error]");
-      form.dataset.templateBusy = "true"; error.hidden = true;
-      for (const chip of chips) { chip.disabled = true; chip.setAttribute("aria-pressed", String(chip === button)); }
-      button.setAttribute("aria-busy", "true");
-      let values = null;
-      try { values = generatedAgent(await generateAgent(template.roleType)); } catch { values = null; }
-      if (!form.isConnected) return;
-      if (!values) { values = template; error.textContent = "Couldn’t tailor this agent to your question, so the standard template was used."; error.hidden = false; }
-      values = templateAgent(values, state.roles.map(role => role.name));
-      for (const [field, value] of Object.entries(values)) form.elements[field].value = value;
-      syncAvatarColorPreview(form);
-      delete form.dataset.templateBusy; button.removeAttribute("aria-busy");
-      for (const chip of chips) chip.disabled = false;
-      form.elements.name.focus({ preventScroll: true });
+      if (!template || !agentEditor || agentEditor.form.dataset.saving) return;
+      agentEditor.form.querySelector("[data-agent-error]").hidden = true;
+      await agentEditor.draft.select(template);
     }
     else if (action === "starter") {
       const starter = STARTERS[Number(button.dataset.index)];
@@ -411,7 +478,11 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       clearTimeout(searchTimer); searchVersion += 1;
       searchTimer = setTimeout(() => runSearch(), 160);
     }
-    if (event.target.matches('[name="name"], [data-avatar-color-choice]')) syncAvatarColorPreview(event.target.closest('[data-workspace-form="agent"]'));
+    const form = event.target.closest('[data-workspace-form="agent"]');
+    if (form && agentEditor?.form === form) {
+      agentEditor.draft.edit(event.target.name);
+      if (event.target.matches('[name="name"], [name="identity"], [data-avatar-color-choice]')) syncAgentPreview(form);
+    }
   });
   dialog.addEventListener("submit", async event => {
     const accountForm = event.target.closest("[data-account-form]");
@@ -419,6 +490,7 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
     const form = event.target.closest("[data-workspace-form]");
     if (!form) return;
     event.preventDefault();
+    if (await folders.submit(form)) return;
     const data = new FormData(form);
     if (form.dataset.workspaceForm === "rename") {
       if (!await beforeNavigate()) return;
@@ -427,15 +499,17 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       return;
     }
     if (form.dataset.workspaceForm === "agent") {
+      if (form.dataset.templateBusy || form.dataset.saving) return;
       const error = form.querySelector("[data-agent-error]");
-      const values = { name: String(data.get("name")).trim(), identity: String(data.get("identity")).trim(), prompt: String(data.get("prompt")).trim(), avatarColor: String(data.get("avatarColor")) };
+      const values = { name: String(data.get("name")).trim(), identity: String(data.get("identity")).trim(), prompt: String(data.get("prompt")).trim(), avatarColor: String(data.get("avatarColor")), roleType: form.dataset.roleType };
       if (!values.name || !values.prompt) { error.textContent = "Add a name and instructions."; error.hidden = false; return; }
       const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
+      form.dataset.saving = "true";
       try {
         if (await saveAgent(form.dataset.roleId, values)) dialog.close();
         else { error.textContent = "Finish the current reply before editing agents."; error.hidden = false; }
       } catch { error.textContent = "Could not save this agent. Please try again."; error.hidden = false; }
-      finally { submit.disabled = false; }
+      finally { delete form.dataset.saving; submit.disabled = Boolean(form.dataset.templateBusy); }
     }
   });
   document.addEventListener("keydown", event => {
@@ -455,5 +529,5 @@ export function createWorkspace({ basePath, appPath, getState, beforeNavigate, b
       }
     }
   });
-  return { renderSidebar, renderSuggestions, notify, sources, profile: currentProfile, isSignedIn: () => Boolean(account.user()), ensureSignedIn: account.ensureSignedIn, ensureReplyAvailable: account.ensureReplyAvailable, refreshUsage: account.refreshUsage, ready, recordSession, syncHistory, showSources, showAgentEditor, waitForAgentEditor, renderAttachments: attachments.render, uploading: attachments.busy };
+  return { renderSidebar, renderSuggestions, syncRoute: folders.syncLocation, renderFolderChip: folders.chip, selectedFolderId: folders.selectedId, notify, sources, profile: currentProfile, isSignedIn: () => Boolean(account.user()), ensureSignedIn: account.ensureSignedIn, ensureReplyAvailable: account.ensureReplyAvailable, refreshUsage: account.refreshUsage, ready, recordSession, syncHistory, showSources, showAgentEditor, waitForAgentEditor, renderAttachments: attachments.render, uploading: attachments.busy };
 }

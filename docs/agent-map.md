@@ -10,7 +10,12 @@
   paid replies when rebasing draft saves.
 - `session_access.py`, `attachments.py`, `agent_tools.py`: private histories,
   revocable viewing links, file ownership, retention and real web citations.
+- `session_folders.py`, `static/app/text/folders.js`, `folders.css`: private
+  conversation filing, folder management and independently paged sidebar lists.
+  Filing is separate from conversation revisions and never shares AI context.
 - `static/app/text/debate.js`: setup, composer, streaming and conversation state.
+- `static/app/text/navigation.js`: in-document workspace routing, latest-request
+  guards and per-conversation reading positions.
 - `static/app/text/workspace.js`, `account.js`, `attachments.js`: sidebar,
   dialogs, account interactions and file controls.
 - `templates/emails/`: shared verification and invitation email layouts.

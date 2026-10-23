@@ -58,5 +58,7 @@ def create_app(test_config: dict | None = None, shell_variant: str | None = None
     register_attachment_routes(app)
     from .session_access import register_session_access_routes
     register_session_access_routes(app)
+    from .session_folders import register_folder_routes
+    register_folder_routes(app)
     register_page_routes(app)
     return app

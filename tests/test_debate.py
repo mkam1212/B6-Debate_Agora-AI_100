@@ -690,6 +690,50 @@ class AgentDebateApiTests(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_single_role_generation_keeps_existing_perspectives_in_initial_and_repair_context(self):
+        temp_dir, app = make_app("/agent-debate")
+        role = {
+            "name": "Priya", "identity": "Daily transit rider", "roleType": "Skeptic",
+            "prompt": "Looks for service gaps. Asks who is left out.", "avatarSeed": 5,
+        }
+        existing = [{"name": "Grace", "identity": "Policy analyst", "prompt": "Check the evidence."}]
+        try:
+            client = authenticated_client(app)
+            with (
+                patch("server.gizmoapp_server.debate_roles.llm.is_configured", return_value=True),
+                patch("server.gizmoapp_server.debate_roles.llm.chat", side_effect=["not json", json.dumps({"roles": [role]})]) as model,
+            ):
+                response = client.post("/agent-debate/api/debate/roles/generate-one", json={
+                    "question": "Should transit be free?", "roleType": "Skeptic",
+                    "existingParticipants": [{**existing[0], "unrelated": "must not be forwarded"}],
+                })
+            self.assertEqual(response.status_code, 200)
+            first_messages = model.call_args_list[0].args[0]
+            data = json.loads(first_messages[1]["content"].split("\n", 1)[1])
+            self.assertEqual(data["existingParticipants"], existing)
+            self.assertIn("not already covered", first_messages[0]["content"])
+            repair = model.call_args_list[1].args[0][1]["content"]
+            self.assertIn(json.dumps(existing, ensure_ascii=False), repair)
+            self.assertNotIn("must not be forwarded", repair)
+            self.assertEqual(response.json["role"]["roleType"], "Skeptic")
+        finally:
+            temp_dir.cleanup()
+
+    def test_single_role_generation_rejects_unbounded_existing_profiles_before_calling_model(self):
+        temp_dir, app = make_app("/agent-debate")
+        try:
+            client = authenticated_client(app)
+            invalid = ["not a list", ["not a profile"], [{}], [{"name": "A", "prompt": "x" * 1001}], [{"name": "A"}] * 17]
+            with patch("server.gizmoapp_server.debate_api.generate_participant_role") as model:
+                for profiles in invalid:
+                    response = client.post("/agent-debate/api/debate/roles/generate-one", json={
+                        "question": "Should transit be free?", "roleType": "Skeptic", "existingParticipants": profiles,
+                    })
+                    self.assertEqual(response.status_code, 400, response.json)
+                model.assert_not_called()
+        finally:
+            temp_dir.cleanup()
+
     def test_role_generation_repairs_missing_identity_and_returns_concrete_person_fields(self):
         malformed_payload = json.loads(generated_roles_response())
         del malformed_payload["roles"][1]["identity"]
@@ -4184,7 +4228,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         ]
         normalizer = self.debate_js[
             self.debate_js.index("function normalizeReplyDiagnostics(value)"):
-            self.debate_js.index("function stageFromLocation()")
+            self.debate_js.index("function stageFromLocation(")
         ]
         reply_status = self.debate_js[
             self.debate_js.index("function renderReplyStatus()"):
@@ -4228,7 +4272,8 @@ class DebateFrontendWiringTests(unittest.TestCase):
             "const shouldFollowLatest = !previousMessageList || isMessageListNearBottom(previousMessageList);",
             render,
         )
-        self.assertIn("messageList.scrollTop = shouldFollowLatest", render)
+        self.assertIn("messageList.scrollTop = follow ? messageList.scrollHeight", render)
+        self.assertIn("savedPosition?.followLatest !== false : shouldFollowLatest", render)
         self.assertIn("const preserveChatInputFocus = document.activeElement === previousChatInput;", render)
         self.assertIn("chatInput.focus({ preventScroll: true });", render)
         self.assertIn("chatInput.setSelectionRange(", render)
@@ -4288,7 +4333,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("Browser storage is optional", remember)
         submit = self.debate_js[
             self.debate_js.index("async function handleSubmit(event)"):
-            self.debate_js.index("async function restoreSession()")
+            self.debate_js.index("async function restoreSession(")
         ]
         self.assertIn("...(avoidNames.length ? { avoidNames } : {})", submit)
         self.assertIn("if (enteredParticipants) rememberGeneratedNames(generatedRoles);", submit)
@@ -4351,7 +4396,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         ]
         submit = self.debate_js[
             self.debate_js.index("async function handleSubmit(event)"):
-            self.debate_js.index("async function restoreSession()")
+            self.debate_js.index("async function restoreSession(")
         ]
         self.assertIn("const ROLE_GENERATION_TIMEOUT_MS = 240_000;", self.debate_js)
         self.assertIn("state.roleGenerationPending || state.roleGenerationError", question_view)
@@ -4391,7 +4436,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         )
         submit_handler = self.debate_js[
             self.debate_js.index("async function handleSubmit(event)"):
-            self.debate_js.index("async function restoreSession()")
+            self.debate_js.index("async function restoreSession(")
         ]
         self.assertNotIn("DEFAULT_ROLES", submit_handler)
         error_handler = submit_handler[
@@ -4430,12 +4475,12 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn('void retryRoleReply();', click_handler)
         submit_handler = self.debate_js[
             self.debate_js.index("async function handleSubmit(event)"):
-            self.debate_js.index("async function restoreSession()")
+            self.debate_js.index("async function restoreSession(")
         ]
         self.assertIn("await submitChatMessage();", submit_handler)
 
         restore_handler = self.debate_js[
-            self.debate_js.index("async function restoreSession()"):
+            self.debate_js.index("async function restoreSession("):
             self.debate_js.index("async function handlePopState()")
         ]
         self.assertIn("state.messages = saved.messages;", restore_handler)
@@ -4487,7 +4532,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("setTimeout(resolve, STREAM_CHUNK_DELAY_MS)", reply)
         self.assertIn("state.priorityReply = { roleId: role?.id || null, initial: false, clearDraft: true }", submit)
         self.assertIn("state.pendingUserMessages.push(pendingMessage);", submit)
-        self.assertIn("if (!await saveSessionNow()) return false;", submit)
+        self.assertIn("if (!await saveSessionNow() || !current()) return false;", submit)
         self.assertIn("void ensureDiscussionLoop(null, true);", submit)
         self.assertIn("state.paused = false;", submit)
         self.assertIn("state.discussionLoopVersion += 1", pause)
@@ -4512,7 +4557,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
             self.debate_js.index("function roleReplyErrorMessage(error)")
         ]
         restore = self.debate_js[
-            self.debate_js.index("async function restoreSession()"):
+            self.debate_js.index("async function restoreSession("):
             self.debate_js.index("async function handlePopState()")
         ]
 
@@ -4528,7 +4573,7 @@ class DebateFrontendWiringTests(unittest.TestCase):
         self.assertIn("state.waitingForUser = false;", restore)
         self.assertNotIn("state.messages.at(-1)?.waitingForUser", restore)
         self.assertIn("state.paused = saved.paused || state.roundComplete;", restore)
-        resume_guard = "if (state.stage === \"debate\" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn())"
+        resume_guard = "if (current() && state.stage === \"debate\" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn())"
         self.assertIn(resume_guard, restore)
         self.assertLess(restore.index("state.paused = saved.paused || state.roundComplete;"), restore.index(resume_guard))
         self.assertIn("state.discussionLoopVersion += 1", pause)

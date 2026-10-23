@@ -59,3 +59,12 @@ A synthetic transcript cannot establish that real people make better decisions o
 - Isolated browser checks verified mixed-batch invitations, streaming while typing, manual pause, refresh recovery and removing an attachment without losing the text draft. Delivery was mocked and no main-account credits were used.
 - The final feature regression passed 251 Python checks and 40 frontend checks. Repository packaging adds safe environment examples, threaded Gunicorn startup settings, focused code-map documentation and runtime/artifact exclusions.
 - Full repository validation passed: 313 Python checks ran with two explicit skips for unavailable optional historical tools/fixtures, plus 40 frontend checks. JavaScript now uses Node's actual parser rather than the previous structural checker that misread valid regular expressions. No production deployment or real-user outcome validation is implied by this upload.
+
+## Conversation organization and mobile refinement, 2026-10-23
+
+- Both Add agent entry points use the same editor. Question-tailored templates preserve edits made while generation is pending, ignore responses after closing, and consider existing participants when suggesting a new perspective.
+- Private folders support creation, renaming, moving conversations and removal without deleting conversations. Folder membership does not alter conversation revisions, reply delivery, sharing or AI context. Ordering follows conversation creation time, with independent pagination for each list.
+- Workspace navigation changes conversations without reloading the document, retains drafts and reading positions, and rejects stale asynchronous responses after navigation or sign-out.
+- Desktop and mobile checks covered long folder names, compact selection pills, interrupted expand/collapse animations, reduced motion, narrower drawers and a bounded folder control in the composer. Mention selection uses the established solid blue treatment.
+- Release validation passed: 323 Python tests ran with two explicit skips for unavailable optional historical tools/fixtures; all 75 frontend tests passed. Tests use temporary databases and mocked providers, without real-user credits or email delivery.
+- Database migration 16 adds private folders and nullable conversation membership. Its regression test upgrades a version-15 database while preserving existing conversation drafts.

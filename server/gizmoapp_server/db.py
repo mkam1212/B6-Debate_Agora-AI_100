@@ -266,6 +266,17 @@ CREATE TABLE debate_reply_commits (
 );
 CREATE INDEX debate_attachments_created ON debate_attachments(created_at);
 """
+SCHEMA_MIGRATIONS[16] = """
+CREATE TABLE debate_folders (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 48),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX debate_folders_owner ON debate_folders(owner_id, created_at, id);
+ALTER TABLE debate_sessions ADD COLUMN folder_id TEXT REFERENCES debate_folders(id) ON DELETE SET NULL;
+CREATE INDEX debate_sessions_folder ON debate_sessions(owner_id, archived, folder_id, created_at DESC, id DESC);
+"""
 LATEST_SCHEMA_VERSION = max(SCHEMA_MIGRATIONS)
 BUSY_TIMEOUT_MS = 10_000
 WRITE_RETRY_DELAYS = (0.05, 0.15, 0.35)

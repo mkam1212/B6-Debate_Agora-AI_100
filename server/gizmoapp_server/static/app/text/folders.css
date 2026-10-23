@@ -1,0 +1,97 @@
+/* Conversation filing follows the existing quiet surfaces and blue pill controls. */
+.debate-body { --folder-selected-surface: #eaf0fc; --folder-selected-ink: #326cce; --folder-item-height: 36px; }
+.folder-library { padding-top: 10px; }
+.folder-section-heading { display: flex; align-items: center; justify-content: space-between; min-height: 30px; margin: 0 0 4px; }
+.folder-library .folder-section-heading h2 { margin: 0; }
+.folder-create-button, .folder-row-menu { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; color: #8b95a6; background: transparent; transition: color 140ms, background-color 140ms; }
+.folder-create-button:hover, .folder-row-menu:hover { color: #246cf6; background: #e7edfa; }
+.folder-create-button .ui-icon { width: 17px; height: 17px; }
+.folder-row-menu .ui-icon { width: 16px; height: 16px; }
+.folder-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; }
+.folder-group { min-width: 0; }
+.folder-row { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; gap: 0; min-width: 0; padding-right: 3px; }
+.folder-row, .folder-row:hover, .folder-row:active, .folder-toggle, .folder-toggle:hover, .folder-toggle:active,
+.folder-row > .folder-row-menu:hover, .folder-row > .folder-row-menu:active { background: transparent; box-shadow: none; }
+.folder-toggle { display: flex; align-items: center; gap: 9px; min-width: 0; flex: 1; min-height: 39px; padding: 8px 1px 8px 0; border: 0; background: none; color: #515b6d; font: 400 13px/1.5 var(--font-body); text-align: left; }
+.folder-toggle > .ui-icon { flex: 0 0 17px; width: 17px; height: 17px; color: #8d9ab0; stroke-width: 1.55; }
+.folder-toggle > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-disclosure { min-width: 0; overflow: hidden; }
+.folder-disclosure[inert] { height: 0; }
+.folder-sessions { display: grid; gap: 2px; margin: 1px 0 7px 13px; }
+/* One blue selection surface around the entire conversation row. */
+.filed-session { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; gap: 0; min-width: 0; min-height: var(--folder-item-height); padding: 0 3px 0 10px; }
+.filed-session.is-current, .filed-session.is-current:hover { background: var(--folder-selected-surface); color: var(--folder-selected-ink); box-shadow: none; }
+.filed-session.is-current .recent-dot { background: var(--folder-selected-ink); }
+.filed-session.is-current .folder-row-menu { color: var(--folder-selected-ink); }
+.filed-session-link { display: flex; align-items: center; gap: 9px; padding: 8px 3px 8px 0; min-width: 0; min-height: var(--folder-item-height); }
+.filed-session-link span { flex: 1; min-width: 0; }
+.filed-session .folder-row-menu { opacity: .6; }
+.filed-session:hover .folder-row-menu, .filed-session:focus-within .folder-row-menu { opacity: 1; }
+.folder-library .ungrouped-heading { margin: 18px 0 7px; }
+.folder-library .recent-list { gap: 3px; }
+.folder-library > .recent-list .recent-dot { display: none; }
+.folder-list-note { margin: 3px 0 6px; padding: 7px 0; color: #929bae; font: 400 12px/1.5 var(--font-body); text-align: left; }
+button.folder-list-note { border: 0; background: transparent; color: #627ca7; }
+.folder-library .recent-more { margin: 3px 0; text-align: left; }
+.composer-folder { display: inline-flex; align-items: center; flex: 0 1 auto; gap: 6px; min-width: 0; max-width: 160px; min-height: 32px; margin-left: 4px; padding: 6px 10px; border: 0; border-radius: 999px; background: #edf0f680; color: #7c879b; box-shadow: inset 0 1px 0 #ffffffa6; font: 400 13px/1.5 var(--font-body); transition: background-color 150ms, color 150ms, box-shadow 150ms; }
+.composer-folder > .ui-icon { flex: 0 0 16px; width: 16px; height: 16px; stroke-width: 1.6; }
+.composer-folder > .ui-icon:last-child { flex-basis: 10px; width: 10px; height: 10px; opacity: .75; }
+.composer-folder > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.composer-folder.has-folder, .composer-folder.has-folder:hover:enabled { background: var(--folder-selected-surface); color: var(--folder-selected-ink); }
+.composer-folder:hover:enabled { background: #e7eefb; color: #246cf6; box-shadow: 0 2px 8px #4267a40b, inset 0 1px 0 #ffffffc9; }
+.question-composer-footer .composer-tools { min-width: 0; flex: 1; }
+.polished-dialog.folder-editor-dialog { width: min(332px, calc(100vw - 32px)); padding: 20px; }
+.polished-dialog.folder-picker-dialog { width: min(340px, calc(100vw - 32px)); padding: 18px 18px 0; }
+.folder-editor-dialog .dialog-heading, .folder-picker-dialog .dialog-heading { margin-bottom: 12px; }
+.folder-editor-dialog .dialog-heading h2, .folder-picker-dialog .dialog-heading h2 { font-size: 20px; }
+.folder-editor-dialog .field { gap: 6px; margin-bottom: 0; color: #7c8698; font-size: 12px; }
+.folder-editor-dialog .field input { height: 36px; min-height: 36px; margin-top: 0; padding: 7px 10px; font-size: 14px; }
+.folder-editor-dialog .dialog-actions { gap: 10px; margin-top: 18px; padding-top: 0; border-top: 0; }
+.folder-editor-dialog .button { min-height: 38px; padding: 8px 18px; border-radius: 999px; font-size: 13px; }
+.folder-editor-dialog .dialog-note { color: #7c8698; font-size: 13px; line-height: 1.7; }
+.folder-editor-dialog .dialog-note strong { color: #53627a; font-weight: 500; overflow-wrap: anywhere; }
+.folder-picker-topic { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: -3px 0 10px; color: #929bad; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.folder-picker-list { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 2px; max-height: min(320px, 45dvh); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.folder-choice { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 100%; min-width: 0; min-height: var(--folder-item-height); padding: 8px 10px; border: 0; border-radius: 999px; background: transparent; color: #647087; text-align: left; font: 400 13px/1.5 var(--font-body); transition: background-color 120ms, color 120ms; }
+.folder-choice > .ui-icon { flex: 0 0 18px; width: 18px; height: 18px; color: #9ca8ba; stroke-width: 1.5; }
+.folder-choice > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-choice:hover { background: #edf0f7; }
+.folder-choice.is-selected { background: var(--folder-selected-surface); color: var(--folder-selected-ink); }
+.folder-choice.is-selected .ui-icon { color: var(--folder-selected-ink); }
+.folder-choice:disabled { opacity: .6; }
+.folder-picker-create { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 10px; margin-top: 6px; border: 0; border-top: 1px solid #e9edf5; background: transparent; color: var(--folder-selected-ink); text-align: left; font: 400 13px/1.5 var(--font-body); }
+.folder-picker-create > .ui-icon { width: 17px; height: 17px; }
+@media (max-width: 719px) {
+  .debate-body { --folder-item-height: 32px; }
+  .composer-folder { max-width: 112px; height: 30px; min-height: 30px; padding: 5px 8px; gap: 5px; margin-left: 2px; font-size: 12px; line-height: 18px; }
+  .composer-folder > .ui-icon { flex-basis: 14px; width: 14px; height: 14px; }
+  .composer-folder > .ui-icon:last-child { flex-basis: 8px; width: 8px; height: 8px; }
+  .question-composer-footer .composer-tools { gap: 2px; }
+  .folder-row, .filed-session { grid-template-columns: minmax(0, 1fr) 30px; }
+  .folder-row-menu { width: 30px; height: 32px; flex-basis: 30px; }
+  .folder-create-button { width: 36px; height: 36px; flex-basis: 36px; }
+  .folder-toggle { min-height: 36px; padding-block: 6px; }
+  .filed-session-link { padding-block: 6px; }
+  .folder-choice { padding-block: 6px; }
+  .polished-dialog.folder-picker-dialog { width: min(300px, calc(100vw - 40px)); }
+  .folder-picker-create { min-height: 36px; padding-block: 8px; }
+}
+@media (max-width: 380px) {
+  .composer-folder { max-width: 96px; }
+  .composer-folder > .ui-icon:first-child { display: none; }
+}
+@media (min-width: 720px) and (pointer: coarse) {
+  .debate-body { --folder-item-height: 44px; }
+  .folder-row, .filed-session { grid-template-columns: minmax(0, 1fr) 38px; }
+  .folder-create-button, .folder-row-menu { width: 38px; height: 44px; flex-basis: 38px; }
+  .folder-create-button { width: 44px; flex-basis: 44px; }
+  .folder-toggle { min-height: 44px; }
+  .folder-picker-create { min-height: 44px; }
+}
+@media (max-width: 719px), (pointer: coarse) {
+  .folder-editor-dialog .button { min-height: 44px; }
+  .folder-editor-dialog .field input { height: 40px; min-height: 40px; font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .folder-toggle > .folder-chevron, .composer-folder, .folder-choice { transition: none; }
+}

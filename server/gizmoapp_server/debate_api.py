@@ -44,6 +44,7 @@ from .debate_roles import (
     MAX_AVOID_NAMES,
     MAX_ROLE_IDENTITY_LENGTH,
     MAX_ROLE_NAME_LENGTH,
+    MAX_ROLE_PROMPT_LENGTH,
     MAX_ROLE_QUESTION_LENGTH,
     ROLE_TYPES,
     RoleGenerationOutputError,
@@ -508,6 +509,22 @@ def _avoid_names(payload: dict[str, Any]) -> list[str]:
     return names
 
 
+def _existing_participants(payload: dict[str, Any]) -> list[dict[str, str]]:
+    raw_participants = payload.get("existingParticipants", [])
+    if not isinstance(raw_participants, list) or len(raw_participants) > MAX_SESSION_PARTICIPANTS:
+        raise ValueError(f"existingParticipants must be a list of at most {MAX_SESSION_PARTICIPANTS} profiles")
+    participants = []
+    for profile in raw_participants:
+        if not isinstance(profile, dict):
+            raise ValueError("existingParticipants entries must be profile objects")
+        participants.append({
+            "name": _string(profile, "name", MAX_ROLE_NAME_LENGTH, required=True),
+            "identity": _string(profile, "identity", MAX_ROLE_IDENTITY_LENGTH),
+            "prompt": _string(profile, "prompt", MAX_ROLE_PROMPT_LENGTH),
+        })
+    return participants
+
+
 def _default_perspectives(question: dict[str, Any]) -> list[dict[str, str]]:
     lower = question.get("question", "").lower()
     if any(word in lower for word in ("story", "narrative", "write", "creative", "character")):
@@ -827,13 +844,14 @@ def register_debate_routes(app: Flask) -> None:
         try:
             question = _string(payload, "question", MAX_ROLE_QUESTION_LENGTH, required=True)
             avoid_names = _avoid_names(payload)
+            existing_participants = _existing_participants(payload)
             role_type = _string(payload, "roleType", 32, required=True)
             if role_type not in ROLE_TYPES:
                 raise ValueError("roleType must use a supported value")
         except ValueError as exc:
             return _error(str(exc))
         try:
-            role = generate_participant_role(question, role_type, avoid_names)
+            role = generate_participant_role(question, role_type, avoid_names, existing_participants)
         except RoleGenerationUnavailable as exc:
             return _error(str(exc), 503)
         except RoleGenerationOutputError as exc:
@@ -900,7 +918,7 @@ def register_debate_routes(app: Flask) -> None:
             snapshot = _normalize_session_snapshot(payload)
         except ValueError as exc:
             return _error(str(exc))
-        session = create_session(get_db(), snapshot, user["id"])
+        session = create_session(get_db(), snapshot, user["id"], folder_id=payload.get("folderId"))
         link_attachments(get_db(), session)
         return jsonify({"session": session_response(session, "owner")}), 201
 

@@ -63,6 +63,7 @@ def session_response(saved, access):
         feedback = get_db().execute("SELECT helpful FROM debate_feedback WHERE session_id=? AND user_id=?", (saved["id"], saved["ownerId"])).fetchone()
         result["feedback"] = bool(feedback["helpful"]) if feedback else None
     if access != "owner":
+        result.pop("folderId", None)
         result.update(draft="", draftAttachments=[], pendingUserMessages=[])
     return result
 
@@ -92,7 +93,7 @@ def register_session_access_routes(app):
 
     @app.after_request
     def private_conversations(response):
-        if request.path.startswith(scoped_path(prefix, "api/debate/sessions")):
+        if request.path.startswith((scoped_path(prefix, "api/debate/sessions"), scoped_path(prefix, "api/debate/folders"))):
             response.headers["Cache-Control"] = "private, no-store"
             response.vary.add("Cookie")
             response.vary.add("X-Debate-Share")
@@ -105,18 +106,28 @@ def register_session_access_routes(app):
         user = _require_user()
         query = request.args.get("q", "").strip()[:200]
         archived = request.args.get("archived") == "1"
+        folder_id = request.args.get("folder")
+        folder_clause = ""
+        folder_params = []
+        if folder_id == "none":
+            folder_clause = " AND folder_id IS NULL"
+        elif folder_id is not None:
+            from .session_folders import require_folder
+            require_folder(get_db(), folder_id, user["id"])
+            folder_clause = " AND folder_id=?"
+            folder_params = [folder_id]
         try:
             offset = max(0, min(100_000, int(request.args.get("offset", 0))))
         except ValueError:
             raise AccountError("Invalid page.") from None
         rows = get_db().execute(
-            "SELECT id,question,title,debate_started,created_at,updated_at,archived FROM debate_sessions s "
-            "WHERE owner_id=? AND archived=? AND (?='' OR instr(lower(title || ' ' || question),lower(?))>0 OR EXISTS "
+            "SELECT id,question,title,debate_started,created_at,updated_at,archived,folder_id FROM debate_sessions s "
+            "WHERE owner_id=? AND archived=?" + folder_clause + " AND (?='' OR instr(lower(title || ' ' || question),lower(?))>0 OR EXISTS "
             "(SELECT 1 FROM json_each(s.messages_json) m WHERE instr(lower(json_extract(m.value,'$.body')),lower(?))>0)) "
-            "ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?", (user["id"], archived, query, query, query, offset),
+            "ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?", (user["id"], archived, *folder_params, query, query, query, offset),
         ).fetchall()
         return jsonify(sessions=[{"id": r["id"], "question": r["title"] or r["question"], "started": bool(r["debate_started"]),
-                                  "createdAt": r["created_at"], "updated": r["updated_at"], "archived": bool(r["archived"])} for r in rows[:50]],
+                                  "createdAt": r["created_at"], "updated": r["updated_at"], "archived": bool(r["archived"]), "folderId": r["folder_id"]} for r in rows[:50]],
                        hasMore=len(rows) > 50, nextOffset=offset + min(len(rows), 50))
 
     @app.post(scoped_path(prefix, "api/debate/sessions/import"))

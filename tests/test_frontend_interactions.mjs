@@ -116,6 +116,36 @@ test('editing an agent does not turn on manual pause', async () => {
   assert.equal(calls[0][0],'one');
 });
 
+test('the setup add button opens the shared editor without inserting a blank participant', () => {
+  const state = baseState({ roles: [{ id: 'one', name: 'Grace' }] });
+  const calls = [];
+  const run = loadFunction('function addRole()', 'function removeSelectedRole()', { editAgents: (...args) => calls.push(args) });
+  run();
+  assert.equal(calls[0][1], true);
+  assert.equal(state.roles.length, 1);
+});
+
+test('a new agent retains its selected approach and shared viewers cannot add agents', async () => {
+  const state = baseState({ groupBuilt: true, nextRoleId: 2, roleEditVersion: 0, sessionId: '' });
+  const values = { name: 'Priya', identity: 'Transit rider', prompt: 'Check service gaps.', avatarColor: '#246cf6', roleType: 'Skeptic' };
+  const run = loadFunction('async function saveAgent(', 'async function generateAgent(', { state, MAX_PARTICIPANTS: 16, ROLE_TYPES: ['Analyst', 'Skeptic'], isAvatarColor: () => true, initials: name => name[0], invalidateRoleGeneration: () => {}, render: () => {} });
+  assert.equal(await run('', values), true);
+  assert.equal(state.roles.at(-1).roleType, 'Skeptic');
+  state.readOnly = true;
+  const count = state.roles.length;
+  assert.equal(await run('', values), false);
+  assert.equal(state.roles.length, count);
+});
+
+test('new agent generation includes existing perspectives without forwarding unrelated state', async () => {
+  const state = baseState({ roles: [{ id: 'one', name: 'Grace', identity: 'Policy analyst', prompt: 'Check evidence.', privateValue: 'excluded' }] });
+  let payload;
+  const run = loadFunction('async function generateAgent(', 'async function removeAgent(', { state, MAX_RECENT_GENERATED_NAMES: 12, ROLE_GENERATION_TIMEOUT_MS: 60000, singleRoleGenerationApi: () => '/generate-one', jsonOptions: (_method, data) => data, requestJson: async (_url, data) => { payload = data; return { role: { name: 'Priya' } }; } });
+  await run('Skeptic');
+  assert.equal(payload.roleType, 'Skeptic');
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.existingParticipants)), [{ name: 'Grace', identity: 'Policy analyst', prompt: 'Check evidence.' }]);
+});
+
 test('typing while an agent replies leaves the discussion running and retains the draft', () => {
   const state=baseState({stage:'debate',replyPending:true,paused:false});
   const input={value:'What if we test one route?',selectionStart:26,matches:selector=>selector==='[data-chat-input]'};

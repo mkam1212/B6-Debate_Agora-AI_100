@@ -1,12 +1,13 @@
 import { consumeStartIntent, rememberStartIntent } from "./start-flow.js?v=allowance-78";
 import { requestEventStream, requestJson } from "../api.js?v=flow-77";
 import { icon, initials, agentName, avatar, avatarStyle, avatarColorPicker, randomAvatarColor, isAvatarColor } from "./ui.js?v=allowance-78";
-import { createWorkspace } from "./workspace.js?v=templates-81";
+import { createWorkspace } from "./workspace.js?v=folder-motion-88";
 import { renderSummaryCopy } from "./summary-view.js?v=allowance-78";
 import { trustedCitations, renderCitedText, streamingText } from "./sources.js?v=web-75";
 import { isDialogBackdropClick, mentionAtCaret, mentionedRole, insertRoleMention, discussionTurnDelay, CONVERSATION_STYLES, withConversationStyle } from "./interaction-utils.js?v=nav-73";
 import { rememberDraft, recoverDraft, acknowledgeDraft } from "./drafts.js";
 import { rememberAttachments, recoverAttachments, acknowledgeAttachments, attachmentIds } from "./attachment-utils.js";
+import { createAppNavigation, createViewPositions } from "./navigation.js?v=navigation-87";
 
 const runtime = window.GizmoAppRuntime;
 const appView = document.getElementById("app-view");
@@ -155,8 +156,8 @@ function formatReplyDiagnostics(value) {
   return `${diagnostics.version} status=${diagnostics.status} request=${diagnostics.requestId} attempts=${attempts}`;
 }
 
-function stageFromLocation() {
-  const pathname = window.location.pathname;
+function stageFromLocation(url = window.location) {
+  const pathname = url.pathname;
   const relative = pathname.startsWith(`${APP_PATH}/`)
     ? pathname.slice(APP_PATH.length + 1).replace(/\/+$/, "")
     : "";
@@ -179,6 +180,9 @@ const state = {
   roundComplete: false,
   replyAbort: null,
   restoreSequence: 0,
+  navigationVersion: 0,
+  navigationPending: false,
+  autoSummarySequence: 0,
   sessionId: sessionIdFromLocation(),
   summarySessionId: "",
   savedParticipantReplyCount: 0,
@@ -244,6 +248,29 @@ const state = {
   priorityReply: null,
   pendingConversationStyle: "",
 };
+
+const viewPositions = createViewPositions();
+let renderedViewKey = "";
+function viewKey() {
+  return state.sessionId ? `${workspace.profile()?.id || "viewer"}:${state.sessionId}:${state.stage}` : "";
+}
+function rememberViewPosition() {
+  const list = appView.querySelector(".message-list");
+  const roles = appView.querySelector(".role-list");
+  viewPositions.save(renderedViewKey, {
+    messageTop: list?.scrollTop || 0,
+    followLatest: list ? isMessageListNearBottom(list) : true,
+    roleTop: roles?.scrollTop || 0,
+    roleLeft: roles?.scrollLeft || 0,
+  });
+}
+function setNavigationBusy(busy) {
+  state.navigationPending = busy;
+  appView.inert = busy;
+  stageNavigation.inert = busy;
+  if (busy) appView.setAttribute("aria-busy", "true");
+  else appView.removeAttribute("aria-busy");
+}
 
 function draftStorage() {
   try { return window.sessionStorage; } catch { return null; }
@@ -650,7 +677,7 @@ function renderQuestion() {
       <div class="question-input-shell">
         ${workspace.renderAttachments(state.draftAttachments, true)}
         <textarea id="question-input" name="question" data-field="question" maxlength="2000" required placeholder="A decision, an idea, a question…" ${state.roleGenerationPhase === "saving" ? "disabled" : ""}>${esc(state.question)}</textarea>
-        <div class="question-composer-footer"><div class="composer-tools"><button class="icon-button" type="button" data-attachment-action="images" aria-label="Upload images (up to 6)">${icon("plus")}</button><button class="icon-button" type="button" data-attachment-action="files" aria-label="Upload files">${icon("paperclip")}</button><button class="icon-button customize-agents-button${state.customizeFirst ? " is-active" : ""}" type="button" data-action="customize-first" aria-label="Customize agents" title="${state.customizeFirst ? "Customize agents: on" : "Customize agents: off"}" aria-pressed="${state.customizeFirst}" ${state.roleGenerationPending ? "disabled" : ""}>${icon("agent-customize")}</button></div><button class="button button-primary build-group-button" type="submit" aria-label="Start conversation" ${state.question.trim() && !state.roleGenerationPending && !workspace.uploading() ? "" : "disabled"}>
+        <div class="question-composer-footer"><div class="composer-tools"><button class="icon-button" type="button" data-attachment-action="images" aria-label="Upload images (up to 6)">${icon("plus")}</button><button class="icon-button" type="button" data-attachment-action="files" aria-label="Upload files">${icon("paperclip")}</button><button class="icon-button customize-agents-button${state.customizeFirst ? " is-active" : ""}" type="button" data-action="customize-first" aria-label="Customize agents" title="${state.customizeFirst ? "Customize agents: on" : "Customize agents: off"}" aria-pressed="${state.customizeFirst}" ${state.roleGenerationPending ? "disabled" : ""}>${icon("agent-customize")}</button>${workspace.renderFolderChip()}</div><button class="button button-primary build-group-button" type="submit" aria-label="Start conversation" ${state.question.trim() && !state.roleGenerationPending && !workspace.uploading() ? "" : "disabled"}>
           ${state.roleGenerationPending
             ? '<span class="button-loading-spinner" aria-hidden="true"></span>'
             : icon("send")}
@@ -852,7 +879,9 @@ function closeSummaryDialog() {
 
 async function requestSummary(regenerate = false) {
   if (state.readOnly) { state.summaryOpen = Boolean(state.summaryText); render(); return Boolean(state.summaryText); }
+  const navigation = state.navigationVersion;
   if (!await workspace.ensureSignedIn()) return false;
+  if (navigation !== state.navigationVersion || state.navigationPending) return false;
   if (summaryActionDisabled()) return false;
   if (state.summaryText && !state.summaryDirty && !regenerate) {
     state.summaryOpen = true;
@@ -916,6 +945,7 @@ function render() {
   workspace.renderSidebar();
   document.body.dataset.debateStage = state.stage;
   if (state.restoreFailed) {
+    renderedViewKey = "";
     stageNavigation.hidden = true;
     stageNavigation.innerHTML = "";
     appView.innerHTML = `<section class="screen restore-error" aria-labelledby="restore-error-title"><div class="restore-error-content"><h1 id="restore-error-title">This conversation won’t open.</h1><p class="restore-error-description" role="alert">${esc(state.restoreMessage)}</p><div class="page-actions"><button class="button button-primary" type="button" data-action="retry-restore">Try again</button></div></div></section>`;
@@ -926,6 +956,9 @@ function render() {
     : state.stage === "debate" ? renderDebate()
       : renderQuestion();
   const previousMessageList = appView.querySelector(".message-list");
+  const nextViewKey = viewKey();
+  const changedView = nextViewKey !== renderedViewKey;
+  const savedPosition = changedView ? viewPositions.get(nextViewKey) : null;
   const previousMessageScroll = previousMessageList?.scrollTop ?? 0;
   const shouldFollowLatest = !previousMessageList || isMessageListNearBottom(previousMessageList);
   const previousRoleList = appView.querySelector(".role-list");
@@ -949,9 +982,9 @@ function render() {
   appView.innerHTML = `<div class="workspace-layout${state.stage === "debate" ? "" : " is-setup"}"><div class="main-column">${renderSaveStatus()}${screen}</div>${state.stage === "debate" ? renderDock() : ""}</div>`;
   const roleList = appView.querySelector(".role-list");
   if (roleList) {
-    roleList.scrollTop = previousRoleScroll.top;
-    roleList.scrollLeft = previousRoleScroll.left;
-    if (previousRoleScroll.selectedId !== state.selectedRoleId || previousRoleScroll.count !== state.roles.length) {
+    roleList.scrollTop = changedView ? savedPosition?.roleTop || 0 : previousRoleScroll.top;
+    roleList.scrollLeft = changedView ? savedPosition?.roleLeft || 0 : previousRoleScroll.left;
+    if ((!changedView || !savedPosition) && (previousRoleScroll.selectedId !== state.selectedRoleId || previousRoleScroll.count !== state.roles.length)) {
       const selected = roleList.querySelector(".is-selected");
       if (selected) {
         const listBounds = roleList.getBoundingClientRect();
@@ -968,10 +1001,11 @@ function render() {
   for (const button of appView.querySelectorAll("button[aria-label]")) button.title = button.getAttribute("aria-label");
   const messageList = appView.querySelector(".message-list");
   if (messageList) {
-    messageList.scrollTop = shouldFollowLatest
-      ? messageList.scrollHeight
-      : Math.min(previousMessageScroll, messageList.scrollHeight);
+    const follow = changedView ? savedPosition?.followLatest !== false : shouldFollowLatest;
+    messageList.scrollTop = follow ? messageList.scrollHeight
+      : Math.min(changedView ? savedPosition.messageTop : previousMessageScroll, messageList.scrollHeight);
   }
+  renderedViewKey = nextViewKey;
   if (previousSelection) {
     const chatInput = appView.querySelector("[data-chat-input]");
     if (chatInput) {
@@ -988,6 +1022,7 @@ function render() {
   const skip = document.querySelector('.skip-link');
   if (skip) skip.href = `${location.pathname}${location.search}#app-view`;
   document.title = `${titles[state.stage]} · Debate Agora`;
+  appNavigation.sync();
 }
 
 function syncRoleGenerationControls() {
@@ -1031,6 +1066,7 @@ function stageUrl(stage) {
 }
 
 async function setStage(stage, updateHistory = true, roleGenerationRequestId = null) {
+  const navigation = state.navigationVersion;
   const allowed = stage === "question"
     || (stage === "participants" && state.groupBuilt && Boolean(state.question.trim()))
     || (stage === "debate" && state.debateStarted);
@@ -1048,6 +1084,7 @@ async function setStage(stage, updateHistory = true, roleGenerationRequestId = n
     render();
     return false;
   }
+  if (navigation !== state.navigationVersion || state.navigationPending) return false;
   if (
     roleGenerationRequestId !== null
     && (state.roleGenerationSequence !== roleGenerationRequestId
@@ -1502,9 +1539,13 @@ function nextReplyForSavedConversation() {
 }
 
 async function startDebate() {
-  if (state.readOnly) return false;
+  if (state.readOnly || state.navigationPending) return false;
+  const navigation = state.navigationVersion, sessionId = state.sessionId;
+  const current = () => navigation === state.navigationVersion && sessionId === state.sessionId && !state.navigationPending;
   if (state.replyPending || state.discussionLoopTask || state.discussionStartPending) return false;
-  if (!await workspace.ensureReplyAvailable()) {
+  const available = await workspace.ensureReplyAvailable();
+  if (!current()) return false;
+  if (!available) {
     if (state.sessionId && !state.readOnly && workspace.isSignedIn()) {
       state.paused = true; state.discussionLoopVersion += 1;
       state.restartDiscussionAfterTask = false; render(); scheduleSessionSave();
@@ -1527,7 +1568,9 @@ async function startDebate() {
     state.messages.push({ kind: "user", id: newChatMessageId(), body: state.question, attachments: state.draftAttachments });
     state.draftAttachments = [];
     rememberComposeDraft();
-    if (!await saveSessionNow()) { state.discussionStartPending = false; return false; }
+    const saved = await saveSessionNow();
+    if (!current()) return false;
+    if (!saved) { state.discussionStartPending = false; return false; }
   }
   state.debateStarted = true;
   if (state.stage !== "debate") {
@@ -1546,9 +1589,13 @@ async function startDebate() {
 }
 
 async function submitChatMessage() {
-  if (state.readOnly) return false;
+  if (state.readOnly || state.navigationPending) return false;
   if (state.stage !== "debate") return false;
-  if (!await workspace.ensureReplyAvailable()) {
+  const navigation = state.navigationVersion, sessionId = state.sessionId;
+  const current = () => navigation === state.navigationVersion && sessionId === state.sessionId && !state.navigationPending;
+  const available = await workspace.ensureReplyAvailable();
+  if (!current()) return false;
+  if (!available) {
     if (state.sessionId && !state.readOnly && workspace.isSignedIn()) {
       state.paused = true; state.discussionLoopVersion += 1;
       state.restartDiscussionAfterTask = false; render(); scheduleSessionSave();
@@ -1608,7 +1655,7 @@ async function submitChatMessage() {
     state.saveTimer = null;
   }
   render();
-  if (!await saveSessionNow()) return false;
+  if (!await saveSessionNow() || !current()) return false;
   void ensureDiscussionLoop(null, true);
   return true;
 }
@@ -1624,7 +1671,8 @@ function retryRoleReply() {
 }
 
 async function retrySavingConversation() {
-  if (!await saveSessionNow()) return false;
+  const sessionId = state.sessionId, navigation = state.navigationVersion;
+  if (!await saveSessionNow() || sessionId !== state.sessionId || navigation !== state.navigationVersion || state.navigationPending) return false;
   const blockedReply = state.replyBlockedBySave ? state.replyRetryTarget : null;
   if (state.replyBlockedBySave) {
     state.replyBlockedBySave = false;
@@ -1739,25 +1787,7 @@ function handleChange(event) {
 }
 
 function addRole() {
-  if (state.roles.length >= MAX_PARTICIPANTS) return;
-  const id = `role-${state.nextRoleId}`;
-  state.nextRoleId += 1;
-  state.roles.push({
-    id,
-    avatar: "💡",
-    avatarColor: randomAvatarColor(state.roles.map(role => role.avatarColor)),
-    name: "New participant",
-    identity: "",
-    prompt: "Bring a distinct perspective and respond to specific points.",
-    roleType: "Analyst",
-  });
-  state.roleEditVersion += 1;
-  invalidateRoleGeneration("A participant changed; the previous response will be ignored.");
-  state.selectedRoleId = id;
-  render();
-  scheduleSessionSave();
-  document.getElementById("role-name")?.focus();
-  document.getElementById("role-name")?.select();
+  void editAgents("", true);
 }
 
 function removeSelectedRole() {
@@ -1917,17 +1947,18 @@ async function maybeSaveCheckpoint() {
   const count = state.savedParticipantReplyCount;
   if (state.readOnly || state.autoSummaryPending || state.summaryLoading || count < 3 || count - state.summaryMessageCount < 6 && state.summaryText) return;
   const sessionId = state.sessionId;
+  const requestId = ++state.autoSummarySequence;
   const version = state.summaryContentVersion;
   state.autoSummaryPending = true;
   try {
     const result = await requestJson(sessionSummaryApi(sessionId), jsonOptions("POST", {}, ROLE_REPLY_TIMEOUT_MS));
-    if (state.sessionId !== sessionId || state.summaryLoading) return;
+    if (state.autoSummarySequence !== requestId || state.sessionId !== sessionId || state.summaryLoading) return;
     state.summaryText = result.summary; state.summarySourceRevision = result.sourceRevision;
     state.summaryMessageCount = result.summarizedMessageCount;
     state.summaryDirty = state.summaryContentVersion !== version;
     if (state.summaryOpen) renderSummaryDialog();
   } catch { /* Checkpoints are optional; a failed refresh never interrupts the conversation. */ }
-  finally { state.autoSummaryPending = false; }
+  finally { if (state.autoSummarySequence === requestId) state.autoSummaryPending = false; }
 }
 
 async function handleSubmit(event) {
@@ -1936,11 +1967,15 @@ async function handleSubmit(event) {
   event.preventDefault();
 
   if (form.dataset.form === "question") {
+    const navigation = state.navigationVersion, sessionId = state.sessionId;
     const customizeFirst = state.customizeFirst;
     if (workspace.uploading()) { workspace.notify("Wait for your attachments to finish uploading."); return; }
     if (!state.question.trim() || state.roleGenerationPending || state.activeRoleGenerationRequestId !== null) return;
     if (!await workspace.ensureReplyAvailable()) return;
+    await workspace.ready;
+    if (navigation !== state.navigationVersion || sessionId !== state.sessionId || state.navigationPending) return;
     if (!state.question.trim() || state.roleGenerationPending || state.activeRoleGenerationRequestId !== null) return;
+    const folderId = workspace.selectedFolderId();
     const question = state.question;
     const requestId = ++state.roleGenerationSequence;
     const roleEditVersion = state.roleEditVersion;
@@ -1971,12 +2006,12 @@ async function handleSubmit(event) {
         requestPhase = "session-save";
         const created = await requestJson(
           sessionApi(),
-          jsonOptions("POST", { ...sessionSnapshot(), question, participants: generatedRoles }),
+          jsonOptions("POST", { ...sessionSnapshot(), question, participants: generatedRoles, folderId }),
         );
         if (!roleGenerationIsCurrent(requestId, question, roleEditVersion)) return;
         state.sessionId = created.session.id;
         state.readOnly = false;
-        workspace.recordSession(created.session);
+        workspace.recordSession(created.session, true);
         acknowledgeAttachments(draftStorage(), draftKey("new"), state.draftAttachments, 0);
         resetSummaryForSession(created.session.id);
         state.sessionRevisions.set(created.session.id, created.session.revision);
@@ -1992,6 +2027,7 @@ async function handleSubmit(event) {
       if (!customizeFirst) {
         completeRoleGeneration(requestId);
         if (!await saveSessionNow()) return;
+        if (navigation !== state.navigationVersion || state.navigationPending) return;
         rememberGeneratedNames(generatedRoles);
         void startDebate();
       } else {
@@ -2025,11 +2061,16 @@ async function handleSubmit(event) {
   }
 }
 
-async function restoreSession() {
+async function restoreSession({ url = new URL(location.href), commit = null, isCurrent = () => true } = {}) {
   await workspace.ready;
-  const sessionId = state.sessionId || sessionIdFromLocation();
+  const sessionId = url.searchParams.get("session") || state.sessionId;
   const restoreId = ++state.restoreSequence;
-  const ownerId = workspace.profile()?.id;
+  let ownerId = workspace.profile()?.id;
+  const current = () => restoreId === state.restoreSequence && isCurrent() && workspace.profile()?.id === ownerId;
+  commit ||= () => {
+    if (url.href !== new URL(location.href).href) window.history.replaceState(window.history.state, "", url.href);
+    return true;
+  };
   if (!sessionId) return false;
   if (state.summarySessionId !== sessionId) resetSummaryForSession(sessionId);
   else {
@@ -2048,18 +2089,22 @@ async function restoreSession() {
   state.replyError = false;
   state.replyDiagnostics = null;
   state.replyRetryTarget = null;
-  state.pendingUserMessages = [];
   state.streamingReply = null;
   state.pendingConversationStyle = "";
   state.replyBlockedBySave = false;
-  appView.setAttribute("aria-busy", "true");
-  appView.innerHTML = "";
+  setNavigationBusy(true);
   try {
-    const share = new URLSearchParams(location.search).get("share");
-    if (!share && !await workspace.ensureSignedIn()) { window.location.assign(APP_PATH); return false; }
+    const share = url.searchParams.get("share");
+    if (!share && !await workspace.ensureSignedIn()) { if (current()) window.location.assign(APP_PATH); return false; }
+    if (!ownerId) ownerId = workspace.profile()?.id;
+    if (!current()) return false;
     const result = await requestJson(sessionApi(`/${encodeURIComponent(sessionId)}${share ? `?share=${encodeURIComponent(share)}` : ''}`));
-    if (restoreId !== state.restoreSequence || workspace.profile()?.id !== ownerId) return false;
+    if (!current()) return false;
     const saved = result.session;
+    const requestedStage = stageFromLocation(url);
+    const incomingStage = saved.access !== "owner" ? "debate" : requestedStage === "debate" && !saved.debateStarted ? "participants" : requestedStage;
+    if (incomingStage !== requestedStage) url.pathname = incomingStage === "question" ? APP_PATH : `${APP_PATH}/${incomingStage}`;
+    if (!commit()) return false;
     state.sessionId = saved.id;
     state.access = saved.access;
     state.summaryFeedback = saved.feedback ?? null;
@@ -2068,6 +2113,12 @@ async function restoreSession() {
     state.title = saved.customTitle || "";
     state.readOnly = saved.access !== "owner";
     state.archived = Boolean(saved.archived);
+    state.failedReplyBody = "";
+    state.discussionStartPending = false;
+    state.priorityReply = null;
+    state.mentionOpen = false;
+    state.mentionQuery = "";
+    workspace.syncRoute();
     workspace.recordSession(saved);
     if (saved.summary) {
       state.summaryText = saved.summary.summary; state.summarySourceRevision = saved.summary.sourceRevision;
@@ -2113,92 +2164,57 @@ async function restoreSession() {
         state.replyDiagnostics = null;
       }
     }
-    state.stage = stageFromLocation();
-    if (state.readOnly) state.stage = "debate";
-    else if (state.stage === "debate" && !state.debateStarted) state.stage = "participants";
-    if (state.stage !== stageFromLocation()) {
-      window.history.replaceState({ debateStage: state.stage }, "", stageUrl(state.stage));
-    }
+    state.stage = incomingStage;
     state.saveStatus = "";
     state.saveFailed = false;
     render();
     await workspace.ready;
-    if (state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn()) {
+    if (current() && state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError && !state.readOnly && workspace.isSignedIn()) {
       void ensureDiscussionLoop(nextReplyForSavedConversation(), true);
     }
     return true;
   } catch (error) {
-    if (restoreId !== state.restoreSequence) return false;
+    if (!current() || !commit()) return false;
+    state.sessionId = sessionId;
     state.restoreFailed = true;
     state.restoreMessage = error?.status === 404 ? "Check the link, or choose another conversation." : "Try again in a moment.";
     render();
     return false;
   } finally {
-    appView.removeAttribute("aria-busy");
+    if (current()) setNavigationBusy(false);
   }
 }
 
 async function handlePopState() {
-  if (state.activeRoleGenerationRequestId !== null) {
-    invalidateRoleGeneration("Navigation changed; the previous response will be ignored.");
-  }
-  if (state.activeReplyRequestId !== null) {
-    state.replySequence += 1;
-    state.activeReplyRequestId = null;
-    state.replyPending = false;
-  }
-  const requestedId = sessionIdFromLocation();
-  if (requestedId && requestedId !== state.sessionId) {
-    if (state.sessionId && state.saveTimer !== null) await saveSessionNow();
-    state.sessionId = requestedId;
-    await restoreSession();
-    return;
-  }
-  if (!requestedId && state.sessionId) {
-    if (state.restoreFailed) {
-        state.sessionId = "";
-        resetSummaryForSession("");
-      state.restoreFailed = false;
-      state.restoreMessage = "";
-      state.question = "";
-      state.roles = defaultRoles();
-      state.roleEditVersion += 1;
-      state.selectedRoleId = "role-1";
-      state.nextRoleId = 4;
-      state.messages = [];
-      state.waitingForUser = false;
-      state.pendingUserMessages = [];
-      state.unsavedMessageIds.clear();
-      state.streamingReply = null;
-      state.composeDraft = "";
-      state.draftAttachments = [];
-      state.groupBuilt = false;
-      state.debateStarted = false;
-      state.paused = false;
-      state.replyMessage = "";
-      state.replyError = false;
-      state.replyDiagnostics = null;
-      state.replyRetryTarget = null;
-      state.saveStatus = "";
-      state.saveFailed = false;
-    } else {
-      if (state.saveTimer !== null) await saveSessionNow();
-      window.history.replaceState({ debateStage: "question" }, "", stageUrl("question"));
-    }
-  } else if (state.saveTimer !== null) {
-    await saveSessionNow();
-  }
-  const requested = stageFromLocation();
-  if (requested !== "question" && !state.question.trim()) {
-    state.stage = "question";
-    window.history.replaceState({ debateStage: "question" }, "", stageUrl("question"));
-  } else {
-    state.stage = requested;
-  }
+  await appNavigation.navigate(location.href, { pop: true });
+}
+
+async function openAppRoute(url, context) {
+  if (!context.isCurrent()) return false;
+  if (url.searchParams.get("session")) return restoreSession({ url, ...context });
+  state.restoreSequence += 1;
+  url.pathname = APP_PATH;
+  if (!context.commit()) return false;
+  resetSummaryForSession("");
+  Object.assign(state, {
+    sessionId: "", stage: "question", access: "owner", readOnly: false, archived: false,
+    title: "", legacyLinkActive: false, sharingEnabled: false, question: (url.searchParams.get("question") || "").slice(0, 2000),
+    roles: defaultRoles(), selectedRoleId: "role-1", nextRoleId: 4, groupBuilt: false, customizeFirst: false, debateStarted: false,
+    paused: false, waitingForUser: false, roundComplete: false, discussionStartPending: false, messages: [], pendingUserMessages: [],
+    composeDraft: "", draftAttachments: recoverAttachments(draftStorage(), draftKey("new"), [], 0),
+    mentionOpen: false, mentionQuery: "", mentionRange: null, mentionActiveIndex: 0,
+    replyMessage: "", replyError: false, replyDiagnostics: null, replyRetryTarget: null, failedReplyBody: "",
+    replyBlockedBySave: false, priorityReply: null, saveStatus: "", saveFailed: false,
+    restoreFailed: false, restoreMessage: "", pendingConversationStyle: "", roleGenerationMessage: "", roleGenerationError: false,
+  });
+  state.unsavedMessageIds.clear();
+  state.roleEditVersion += 1;
+  workspace.syncRoute();
   render();
-  if (state.stage === "debate" && state.debateStarted && !state.paused && !state.replyError) {
-    void ensureDiscussionLoop(nextReplyForSavedConversation(), true);
+  if (url.searchParams.get("start") === "1" && state.question.trim() && consumeStartIntent(sessionStorage, state.question)) {
+    window.setTimeout(() => { if (context.isCurrent()) void handleSubmit({ target: appView.querySelector('[data-form="question"]'), preventDefault() {} }); }, 0);
   }
+  return true;
 }
 
 function handlePageHide() {
@@ -2206,14 +2222,15 @@ function handlePageHide() {
 }
 
 async function editAgents(roleId, add = false) {
-  if (state.replyPending || !state.groupBuilt) return;
+  if (state.readOnly || state.replyPending || !state.groupBuilt || (add && state.roles.length >= MAX_PARTICIPANTS)) return;
   workspace.showAgentEditor(roleId || state.selectedRoleId, add);
 }
 
 async function saveAgent(roleId, values) {
-  if (state.replyPending || !state.groupBuilt || !values.name || !values.prompt) return false;
+  if (state.readOnly || state.replyPending || !state.groupBuilt || !values.name || !values.prompt) return false;
   if (values.name.length > 48 || values.identity.length > 96 || values.prompt.length > 1000) return false;
   if (!isAvatarColor(values.avatarColor)) return false;
+  if (values.roleType && !ROLE_TYPES.includes(values.roleType)) return false;
   if (roleId) {
     const role = state.roles.find(item => item.id === roleId);
     if (!role) return false;
@@ -2234,9 +2251,10 @@ async function generateAgent(roleType) {
   const question = state.question.trim();
   if (!question) return null;
   const avoidNames = state.roles.map(role => role.name).slice(-MAX_RECENT_GENERATED_NAMES);
+  const existingParticipants = state.roles.map(({ name, identity = "", prompt = "" }) => ({ name, identity, prompt }));
   const response = await requestJson(
     singleRoleGenerationApi(),
-    jsonOptions("POST", { question, roleType, ...(avoidNames.length ? { avoidNames } : {}) }, ROLE_GENERATION_TIMEOUT_MS),
+    jsonOptions("POST", { question, roleType, existingParticipants, ...(avoidNames.length ? { avoidNames } : {}) }, ROLE_GENERATION_TIMEOUT_MS),
   );
   return response?.role ?? null;
 }
@@ -2287,7 +2305,10 @@ function handleComposerKeydown(event) {
 }
 
 function cancelActiveWork() {
+  state.navigationVersion += 1;
   state.discussionLoopVersion += 1;
+  state.discussionLoopTask = null;
+  state.discussionStartPending = false;
   state.restartDiscussionAfterTask = false;
   state.replyAbort?.abort();
   state.activeReplyRequestId = null;
@@ -2297,9 +2318,15 @@ function cancelActiveWork() {
   state.activeRoleGenerationRequestId = null;
   state.roleGenerationPending = false;
   state.summaryRequestSequence += 1;
+  state.autoSummarySequence += 1;
+  state.autoSummaryPending = false;
+  state.autoSummaryTask = null;
 }
 
 function clearPrivateView() {
+  appNavigation.cancel();
+  viewPositions.clear();
+  renderedViewKey = "";
   cancelActiveWork();
   state.restoreSequence += 1;
   if (state.saveTimer !== null) window.clearTimeout(state.saveTimer);
@@ -2323,15 +2350,24 @@ function clearPrivateView() {
 }
 
 async function prepareNavigation() {
+  rememberViewPosition();
+  rememberComposeDraft();
   if (state.readOnly || state.restoreFailed || !workspace.isSignedIn()) return true;
   if (workspace.uploading()) { workspace.notify("Wait for the upload to finish, or remove it before switching debates."); return false; }
   cancelActiveWork();
   if (!state.sessionId || state.conflictedSessions.has(state.sessionId)) return true;
   if (state.debateStarted) state.paused = true;
-  render();
   const saved = await saveSessionNow();
   return saved || [401, 404, 409].includes(state.saveErrorStatus);
 }
+const appNavigation = createAppNavigation({
+  appPath: APP_PATH,
+  location: () => location.href,
+  history: window.history,
+  prepare: prepareNavigation,
+  transition: openAppRoute,
+  busy: setNavigationBusy,
+});
 const workspace = createWorkspace({
   basePath: BASE_PATH,
   appPath: APP_PATH,
@@ -2339,6 +2375,8 @@ const workspace = createWorkspace({
   refresh: render,
   attachmentsChanged: (saveNow = false) => { rememberComposeDraft(); return state.sessionId ? scheduleSessionSave(saveNow) : true; },
   beforeNavigate: prepareNavigation,
+  navigateApp: (path, options) => appNavigation.navigate(path, options),
+  routeChanged: () => appNavigation.sync(),
   beforeSignOut: async () => {
     cancelActiveWork();
     if (state.sessionId && !state.readOnly && !state.restoreFailed) {
@@ -2361,10 +2399,8 @@ const workspace = createWorkspace({
   generateAgent,
   useQuestion: async (question) => {
     if (state.sessionId) {
-      if (!await prepareNavigation()) return false;
       rememberStartIntent(sessionStorage, question);
-      window.location.assign(`${APP_PATH}?start=1&question=${encodeURIComponent(question)}`);
-      return true;
+      return appNavigation.navigate(`${APP_PATH}?start=1&question=${encodeURIComponent(question)}`);
     }
     if (state.roleGenerationPending) { workspace.notify("Wait for the current group to finish."); return false; }
     if (question !== state.question) invalidateRoleGeneration();
